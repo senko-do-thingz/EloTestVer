@@ -1,0 +1,2123 @@
+import asyncio
+
+import discord
+from discord.ext import commands
+
+from config import YES_EMOJI, NO_EMOJI
+from db.elo_db import db_connection
+from utils import (
+    add_league_announce_channel_id,
+    get_league_announce_channel_ids,
+    get_leagues,
+    is_admin,
+    pick_league_role_id_for_elo,
+    remove_league_announce_channel_id,
+    set_leagues,
+    sync_league_roles,
+)
+
+
+class RolesCog(commands.Cog):
+    def __init__(self, bot: commands.Bot):
+        self.bot = bot
+        self._pending_league_task: dict[tuple[int, int, int], asyncio.Event] = {}
+
+    def _league_task_key(self, ctx: commands.Context) -> tuple[int, int, int]:
+        return (ctx.guild.id, ctx.channel.id, ctx.author.id)
+
+    def _try_begin_league_task(self, ctx: commands.Context) -> asyncio.Event | None:
+        key = self._league_task_key(ctx)
+        if key in self._pending_league_task:
+            return None
+        ev = asyncio.Event()
+        self._pending_league_task[key] = ev
+        return ev
+
+    def _end_league_task(self, ctx: commands.Context) -> None:
+        self._pending_league_task.pop(self._league_task_key(ctx), None)
+
+    def _parse_league_name(self, name_raw: str) -> str:
+        return (
+            name_raw.replace("_", " ")
+            if len(name_raw) >= 2 and "_" in name_raw
+            else name_raw
+        )
+
+    def _format_league_display(
+        self,
+        role_by_id: dict[int, discord.Role],
+        name: str,
+        role_id: int | None,
+    ) -> str:
+        role = role_by_id.get(role_id) if role_id else None
+        return role.mention if role else f"`{name}`"
+
+    def _format_role_members(
+        self, role: discord.Role | None, *, max_mentions: int = 25
+    ) -> tuple[str, int]:
+        if role is None:
+            return "*Role not found.*", 0
+        members = list(role.members)
+        count = len(members)
+        if count == 0:
+            return "*No players in this league.*", 0
+
+        mentions = [m.mention for m in members[:max_mentions]]
+        extra = count - len(mentions)
+        if extra > 0:
+            mentions.append(f"*…and {extra} more*")
+        return " ".join(mentions), count
+
+    def _get_registered_players_grouped_by_target_league(
+        self,
+        guild: discord.Guild,
+        leagues: list[tuple[str, int | None, int | None, str, str, int | None, int]],
+    ) -> dict[int, list[int]]:
+        role_by_id: dict[int, discord.Role] = {r.id: r for r in guild.roles}
+        effective_leagues = [
+            (name, min_elo, max_elo, min_kind, max_kind, role_id)
+            for (name, min_elo, max_elo, min_kind, max_kind, role_id, _disc) in leagues
+            if role_id is not None and role_id in role_by_id
+        ]
+        grouped: dict[int, list[int]] = {}
+        if not effective_leagues:
+            return grouped
+
+        with db_connection(guild.id) as (conn, cursor):
+            cursor.execute("SELECT id, elo, games_won, games_lost FROM players")
+            rows = cursor.fetchall()
+
+        for player_id_raw, elo_raw, gw_raw, gl_raw in rows:
+            try:
+                player_id = int(player_id_raw)
+                elo = int(elo_raw)
+                gw = int(gw_raw)
+                gl = int(gl_raw)
+            except Exception:
+                continue
+            if gw + gl <= 0:
+                continue
+            role_id = pick_league_role_id_for_elo(effective_leagues, elo)
+            if role_id is None:
+                continue
+            grouped.setdefault(role_id, []).append(player_id)
+
+        for role_id in grouped:
+            grouped[role_id].sort()
+        return grouped
+
+    def _format_league_apply_delta(
+        self,
+        added: list[tuple[int, int]],
+        removed: list[tuple[int, int]],
+    ) -> str:
+        lines_added: list[str] = []
+        if added:
+            for uid, rid in sorted(added, key=lambda x: (x[0], x[1])):
+                lines_added.append(f"<@{uid}> → <@&{rid}>")
+
+        lines_removed: list[str] = []
+        if removed:
+            by_user: dict[int, list[int]] = {}
+            for uid, rid in removed:
+                by_user.setdefault(uid, []).append(rid)
+            for uid in sorted(by_user.keys()):
+                rids = sorted(set(by_user[uid]))
+                roles_part = " ".join(f"<@&{r}>" for r in rids)
+                lines_removed.append(f"<@{uid}>: {roles_part}")
+
+        sec1 = "**Players who received a league role:**\n" + (
+            "\n".join(lines_added) if lines_added else "*None.*"
+        )
+        sec2 = "**Players who had a league role removed:**\n" + (
+            "\n".join(lines_removed) if lines_removed else "*None.*"
+        )
+        text = f"{sec1}\n\n{sec2}"
+        if len(text) > 3500:
+            text = text[:3500] + "\n*(truncated…)*"
+        return text
+
+    def _format_member_mentions_from_ids(
+        self,
+        user_ids: list[int],
+        *,
+        max_mentions: int | None = 25,
+        one_per_line: bool = False,
+        comma_wrap_every: int | None = None,
+    ) -> tuple[str, int]:
+        count = len(user_ids)
+        if count == 0:
+            return "*No players in this league.*", 0
+
+        limit = count if max_mentions is None else min(max_mentions, count)
+        slice_ids = user_ids[:limit]
+        extra = count - len(slice_ids)
+
+        if comma_wrap_every is not None and comma_wrap_every > 0:
+            lines: list[str] = []
+            for i in range(0, len(slice_ids), comma_wrap_every):
+                chunk = slice_ids[i : i + comma_wrap_every]
+                lines.append(", ".join(f"<@{uid}>" for uid in chunk))
+            text = "\n".join(lines)
+            if extra > 0:
+                text += f"\n*…and {extra} more*"
+            return text, count
+
+        mentions = [f"<@{user_id}>" for user_id in slice_ids]
+        if extra > 0:
+            mentions.append(f"*…and {extra} more*")
+        sep = "\n" if one_per_line else " "
+        return sep.join(mentions), count
+
+    def _population_notes_suffix(self, pop_stats: list[tuple[int, str]]) -> str:
+        """Most / least lines; if the same league is both, least shows '-'."""
+        if not pop_stats:
+            return "\n- Most populated: -\n- Least populated: -"
+        most = max(pop_stats, key=lambda x: x[0])
+        least = min(pop_stats, key=lambda x: x[0])
+        lines = f"\n- Most populated: {most[1]} (**{most[0]}**)"
+        if most[1] == least[1]:
+            lines += "\n- Least populated: -"
+        else:
+            lines += f"\n- Least populated: {least[1]} (**{least[0]}**)"
+        return lines
+
+    def _league_announce_channels_lines(self, guild: discord.Guild) -> list[str]:
+        ids = get_league_announce_channel_ids(guild.id)
+        if not ids:
+            return ["*None configured.*"]
+        out: list[str] = []
+        for cid in ids:
+            ch = guild.get_channel(cid)
+            if isinstance(ch, discord.TextChannel):
+                out.append(f"- {ch.mention} (`{ch.name}`)")
+            else:
+                out.append(f"- Unknown or deleted channel (ID `{cid}`)")
+        return out
+
+    def _leagues_matching_name_query(
+        self,
+        leagues: list[tuple[str, int | None, int | None, str, str, int | None, int]],
+        query: str,
+    ) -> list[tuple[str, int | None, int | None, str, str, int | None, int]]:
+        q = query.strip().lower()
+        if not q:
+            return []
+        return [row for row in leagues if q in row[0].lower()]
+
+    def _leagues_author_header_and_footer(
+        self,
+        ctx: commands.Context,
+        guild: discord.Guild,
+        leagues: list[tuple[str, int | None, int | None, str, str, int | None, int]],
+    ) -> tuple[str, str | None]:
+        """
+        Header: which league the invoker is in (by Elo + ≥1 game), or why not yet.
+        Footer: small note only when they do not qualify for a league placement.
+        """
+        role_by_id = {r.id: r for r in guild.roles}
+        with db_connection(guild.id) as (conn, cursor):
+            cursor.execute(
+                "SELECT elo, games_won, games_lost FROM players WHERE id=?",
+                (str(ctx.author.id),),
+            )
+            row = cursor.fetchone()
+
+        if not row:
+            header = (
+                f"**Your league:** — *({ctx.author.display_name} is not registered)*"
+            )
+            footer = (
+                "*Register with `-register <name>` to get a league by Elo after you "
+                "play matches.*"
+            )
+            return header, footer
+
+        elo, gw, gl = int(row[0]), int(row[1]), int(row[2])
+        if gw + gl <= 0:
+            header = "**Your league:** — *(no wins or losses yet)*"
+            footer = (
+                "*Play at least one set (record a win or loss) to be placed into a "
+                "league by Elo.*"
+            )
+            return header, footer
+
+        effective = [
+            (n, mi, ma, mik, mak, rid)
+            for (n, mi, ma, mik, mak, rid, _d) in leagues
+            if rid is not None and rid in role_by_id
+        ]
+        rid = pick_league_role_id_for_elo(effective, elo)
+        if rid is None:
+            header = "**Your league:** — *(Elo is outside every configured range)*"
+            footer = (
+                "*Your Elo does not fall into any league bracket yet (or leagues have "
+                "no valid roles on this server).*"
+            )
+            return header, footer
+
+        lname = next(
+            (n for n, _a, _b, _c, _d, r in effective if r == rid),
+            "?",
+        )
+        role = role_by_id.get(rid)
+        lab = role.mention if role else f"`{lname}`"
+        header = f"**Your league:** {lab}"
+        return header, None
+
+
+    async def _remove_bot_reactions(self, message: discord.Message) -> None:
+        bot_user = getattr(self.bot, "user", None)
+        if not bot_user:
+            return
+        for emoji in (YES_EMOJI, NO_EMOJI):
+            try:
+                await message.remove_reaction(emoji, bot_user)
+            except Exception:
+                pass
+    async def _leagues_detail_by_name(
+        self,
+        ctx: commands.Context,
+        leagues: list[tuple[str, int | None, int | None, str, str, int | None, int]],
+        query: str,
+    ) -> None:
+        matches = self._leagues_matching_name_query(leagues, query)
+        if not matches:
+            await ctx.send(
+                embed=discord.Embed(
+                    title="League Not Found",
+                    description=f"No league found with a name containing `{query.strip()}`.",
+                    color=discord.Color.red(),
+                )
+            )
+            return
+
+        if len(matches) > 1:
+            opts: list[str] = []
+            for row in matches:
+                lname, _mi, _ma, _mik, _mak, _rid, disc = row
+                disc_tag = " *(undiscovered)*" if not disc else ""
+                opts.append(f"- `{lname}`{disc_tag}")
+            embed = discord.Embed(
+                title="Multiple Leagues Found",
+                description=(
+                    f"Found **{len(matches)}** leagues matching `{query.strip()}`:\n\n"
+                    + "\n".join(opts)
+                ),
+                color=discord.Color.yellow(),
+            )
+            embed.add_field(
+                name="",
+                value="Please be more specific (closer match to one league name).",
+                inline=False,
+            )
+            await ctx.send(embed=embed)
+            return
+
+        row = matches[0]
+        name, min_elo, max_elo, min_kind, max_kind, role_id, discovered = row
+        if not discovered:
+            await ctx.send(
+                embed=discord.Embed(
+                    title="League Not Found",
+                    description=(
+                        f"No **discovered** league matches `{query.strip()}`. "
+                        "Undiscovered leagues cannot be viewed with this command yet."
+                    ),
+                    color=discord.Color.red(),
+                )
+            )
+            return
+
+        role_by_id = {r.id: r for r in ctx.guild.roles}
+        role = role_by_id.get(role_id) if role_id else None
+        role_display = role.mention if role else f"`{name}`"
+        range_display = self._format_range(min_elo, max_elo, min_kind, max_kind)
+
+        grouped = self._get_registered_players_grouped_by_target_league(
+            ctx.guild, leagues
+        )
+        member_ids = grouped.get(role_id, []) if role_id else []
+        member_block, member_count = self._format_member_mentions_from_ids(
+            member_ids, max_mentions=None, comma_wrap_every=5
+        )
+
+        desc = (
+            f"{role_display}\n"
+            f"**Elo range:** {range_display}\n"
+            f"**Players ({member_count}):**\n{member_block}"
+        )
+        if len(desc) > 3900:
+            desc = desc[:3900] + "\n\n*(truncated…)*"
+
+        await ctx.send(
+            embed=discord.Embed(
+                title="League",
+                description=desc,
+                color=discord.Color.blurple(),
+            )
+        )
+
+    def _count_registered_players_with_league_roles(
+        self, guild: discord.Guild, league_role_ids: set[int]
+    ) -> int:
+        if not league_role_ids:
+            return 0
+
+        with db_connection(guild.id) as (conn, cursor):
+            cursor.execute("SELECT id FROM players")
+            player_rows = cursor.fetchall()
+
+        registered_ids: set[int] = set()
+        for (player_id_raw,) in player_rows:
+            try:
+                registered_ids.add(int(player_id_raw))
+            except Exception:
+                continue
+
+        count = 0
+        for player_id in registered_ids:
+            member = guild.get_member(player_id)
+            if member is None:
+                continue
+            if any(role.id in league_role_ids for role in member.roles):
+                count += 1
+        return count
+
+    async def _apply_leagues(
+        self,
+        guild: discord.Guild,
+        *,
+        mark_populated_leagues_discovered: bool = False,
+    ) -> tuple[int, int, list[str], str]:
+        updated, missing_from_db, added_log, removed_log = await sync_league_roles(
+            guild
+        )
+        leagues = get_leagues(guild.id)
+        grouped = self._get_registered_players_grouped_by_target_league(guild, leagues)
+        assigned_count = sum(len(user_ids) for user_ids in grouped.values())
+
+        if mark_populated_leagues_discovered:
+            role_ids_to_discover = sorted(
+                {
+                    rid
+                    for rid, user_ids in grouped.items()
+                    if rid is not None and len(user_ids) >= 1
+                }
+            )
+            if role_ids_to_discover:
+                with db_connection(guild.id) as (conn, cursor):
+                    cursor.executemany(
+                        "UPDATE leagues SET discovered=1 WHERE role_id=?",
+                        [(rid,) for rid in role_ids_to_discover],
+                    )
+                    conn.commit()
+
+        details = self._format_league_apply_delta(added_log, removed_log)
+        return updated, assigned_count, missing_from_db, details
+
+    def _parse_league_lines(self, ctx: commands.Context, raw_lines: list[str]) -> tuple[
+        list[tuple[str, int | None, int | None, str, str, int | None, int]],
+        list[str],
+        list[str],
+    ]:
+        bad_lines: list[str] = []
+        missing_roles: list[str] = []
+        leagues_to_store: list[
+            tuple[str, int | None, int | None, str, str, int | None, int]
+        ] = []
+
+        for ln in raw_lines:
+            parts = ln.split()
+            if len(parts) not in (3, 4):
+                bad_lines.append(ln)
+                continue
+
+            if len(parts) == 3:
+                name_raw, min_s, max_s = parts
+                discovered = 0
+            else:
+                name_raw, min_s, max_s, disc_s = parts
+                try:
+                    discovered = int(disc_s)
+                except ValueError:
+                    bad_lines.append(ln)
+                    continue
+                if discovered not in (0, 1):
+                    bad_lines.append(ln)
+                    continue
+
+            name = self._parse_league_name(name_raw)
+
+            min_kind = "n"
+            max_kind = "n"
+            min_elo: int | None = None
+            max_elo: int | None = None
+
+            if min_s.lower() == "l":
+                min_kind = "l"
+                try:
+                    max_elo = int(max_s)
+                except ValueError:
+                    bad_lines.append(ln)
+                    continue
+            elif max_s.lower() == "h":
+                max_kind = "h"
+                try:
+                    min_elo = int(min_s)
+                except ValueError:
+                    bad_lines.append(ln)
+                    continue
+            else:
+                try:
+                    min_elo = int(min_s)
+                    max_elo = int(max_s)
+                except ValueError:
+                    bad_lines.append(ln)
+                    continue
+                if min_elo > max_elo:
+                    bad_lines.append(ln)
+                    continue
+
+            role = discord.utils.get(ctx.guild.roles, name=name)
+            if not role:
+                missing_roles.append(name)
+                continue
+
+            leagues_to_store.append(
+                (name, min_elo, max_elo, min_kind, max_kind, role.id, discovered)
+            )
+
+        return leagues_to_store, bad_lines, missing_roles
+
+    def _format_range(
+        self,
+        min_elo: int | None,
+        max_elo: int | None,
+        min_kind: str,
+        max_kind: str,
+    ) -> str:
+        if min_kind == "l":
+            return f"Lower - {max_elo}"
+        if max_kind == "h":
+            return f"{min_elo} - Higher"
+        return f"{min_elo} - {max_elo}"
+
+    def _effective_range(
+        self,
+        min_elo: int | None,
+        max_elo: int | None,
+        min_kind: str,
+        max_kind: str,
+    ) -> tuple[int, int]:
+        low = -(10**18) if min_kind == "l" else int(min_elo)  # type: ignore[arg-type]
+        high = 10**18 if max_kind == "h" else int(max_elo)  # type: ignore[arg-type]
+        return low, high
+
+    async def _ask_reply_number(
+        self,
+        ctx: commands.Context,
+        prompt_embed: discord.Embed,
+        *,
+        min_value: int,
+        max_value: int,
+        timeout_s: float = 300.0,
+        cancel_event: asyncio.Event | None = None,
+    ) -> int | None:
+        prompt_msg = await ctx.send(embed=prompt_embed)
+
+        def check(m: discord.Message):
+            return (
+                m.author.id == ctx.author.id
+                and m.channel.id == ctx.channel.id
+                and m.reference is not None
+                and m.reference.message_id == prompt_msg.id
+            )
+
+        message_task = asyncio.create_task(
+            self.bot.wait_for("message", timeout=timeout_s, check=check)
+        )
+        cancel_task = (
+            asyncio.create_task(cancel_event.wait())
+            if cancel_event is not None
+            else None
+        )
+        try:
+            if cancel_task is None:
+                reply: discord.Message = await message_task
+            else:
+                done, pending = await asyncio.wait(
+                    {message_task, cancel_task},
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                for t in pending:
+                    t.cancel()
+                if (
+                    cancel_task in done
+                    and cancel_event is not None
+                    and cancel_event.is_set()
+                ):
+                    await ctx.send(
+                        embed=discord.Embed(
+                            title="Canceled",
+                            description="League task has been canceled.",
+                            color=discord.Color.red(),
+                        )
+                    )
+                    return None
+                reply = message_task.result()
+        except Exception:
+            await ctx.send(
+                embed=discord.Embed(
+                    title="Timeout",
+                    description="Timed out. Please try again.",
+                    color=discord.Color.red(),
+                )
+            )
+            return None
+
+        try:
+            n = int((reply.content or "").strip())
+        except ValueError:
+            await ctx.send(
+                embed=discord.Embed(
+                    title="Invalid Number",
+                    description="Please reply with a valid number.",
+                    color=discord.Color.red(),
+                )
+            )
+            return None
+
+        if n < min_value or n > max_value:
+            await ctx.send(
+                embed=discord.Embed(
+                    title="Out of Range",
+                    description=f"Please reply with a number between **{min_value}** and **{max_value}**.",
+                    color=discord.Color.red(),
+                )
+            )
+            return None
+
+        return n
+
+    @commands.command(
+        name="leagues",
+        help=(
+            "Show league roles, Elo ranges, and player counts. "
+            "Usage: -leagues | -leagues <server_id> | -leagues <name> (substring match)"
+        ),
+    )
+    async def leagues(self, ctx: commands.Context, *, league_query: str = ""):
+        # Check if the first token is a server_id (all digits)
+        target_guild = ctx.guild
+        q = league_query.strip()
+        tokens = q.split(None, 1)
+        if tokens and tokens[0].isdigit():
+            server_id = int(tokens[0])
+            resolved = self.bot.get_guild(server_id)
+            if resolved is None:
+                await ctx.send(
+                    embed=discord.Embed(
+                        title="Server Not Found",
+                        description=f"Bot is not in a server with ID `{server_id}`, or that ID is invalid.",
+                        color=discord.Color.red(),
+                    )
+                )
+                return
+            target_guild = resolved
+            q = tokens[1].strip() if len(tokens) > 1 else ""
+
+        leagues = get_leagues(target_guild.id)
+        if not leagues:
+            label = f" (server `{target_guild.id}`)" if target_guild.id != ctx.guild.id else ""
+            await ctx.send(
+                embed=discord.Embed(
+                    title="No Leagues",
+                    description=f"No leagues have been set up yet{label}. Use `-ladd <number>` first.",
+                    color=discord.Color.red(),
+                )
+            )
+            return
+
+        if q:
+            await self._leagues_detail_by_name(ctx, leagues, q)
+            return
+
+        viewing_other = target_guild.id != ctx.guild.id
+        if viewing_other:
+            author_header = f"*Viewing leagues from **{discord.utils.escape_markdown(target_guild.name)}** (`{target_guild.id}`)*"
+            author_footer = None
+        else:
+            author_header, author_footer = self._leagues_author_header_and_footer(
+                ctx, ctx.guild, leagues
+            )
+
+        role_by_id = {r.id: r for r in target_guild.roles}
+
+        grouped_by_target = self._get_registered_players_grouped_by_target_league(
+            target_guild, leagues
+        )
+        lines: list[str] = []
+        pop_stats: list[tuple[int, str]] = []
+        hidden_count = 0
+
+        for name, min_elo, max_elo, min_kind, max_kind, role_id, discovered in reversed(leagues):
+            role = role_by_id.get(role_id) if role_id else None
+            role_display = role.mention if role else f"`{name}`"
+            range_display = self._format_range(min_elo, max_elo, min_kind, max_kind)
+
+            if not discovered:
+                hidden_count += 1
+                continue
+
+            member_ids = grouped_by_target.get(role_id, []) if role_id else []
+            _mentions, member_count = self._format_member_mentions_from_ids(member_ids)
+            if member_count > 0:
+                pop_stats.append((member_count, role_display))
+            lines.append(
+                f"{role_display}: **{range_display}** — **{member_count}** player(s)"
+            )
+
+        body = "\n".join(lines) if lines else "*No leagues discovered yet.*"
+        if hidden_count > 0:
+            body += f"\n\n*There are still {hidden_count} league(s) left to discover — keep playing!*"
+
+        body += "\n\n**Population notes**" + self._population_notes_suffix(pop_stats)
+
+        usage_notes = (
+            "\n\n**How to list players in one league**\n"
+            "*Use* `-leagues <league_name>`\n"
+            "*Do **not** put* `@` *or role mentions in* `<league_name>`*; You will ping "
+            "everyone with that role or treat it as a mention.*"
+        )
+        tail = ""
+        if author_footer:
+            tail = f"\n\n{author_footer}"
+
+        description = f"{author_header}\n\n{body}{usage_notes}{tail}"
+
+        await ctx.send(
+            embed=discord.Embed(
+                title="Leagues",
+                description=description,
+                color=discord.Color.blurple(),
+            )
+        )
+
+    @commands.command(
+        name="ladmin",
+        help="Admin view: show all leagues (discovered and undiscovered). Usage: -ladmin | -ladmin <server_id>",
+    )
+    @commands.check(is_admin)
+    async def ladmin(self, ctx: commands.Context, *, args: str = ""):
+        target_guild = ctx.guild
+        tokens = args.strip().split(None, 1)
+        if tokens and tokens[0].isdigit():
+            server_id = int(tokens[0])
+            resolved = self.bot.get_guild(server_id)
+            if resolved is None:
+                await ctx.send(
+                    embed=discord.Embed(
+                        title="Server Not Found",
+                        description=f"Bot is not in a server with ID `{server_id}`, or that ID is invalid.",
+                        color=discord.Color.red(),
+                    )
+                )
+                return
+            target_guild = resolved
+
+        leagues = get_leagues(target_guild.id)
+        if not leagues:
+            label = f" (server `{target_guild.id}`)" if target_guild.id != ctx.guild.id else ""
+            await ctx.send(
+                embed=discord.Embed(
+                    title="No Leagues",
+                    description=f"No leagues have been set up yet{label}. Use `-ladd <number>` first.",
+                    color=discord.Color.red(),
+                )
+            )
+            return
+
+        role_by_id = {r.id: r for r in target_guild.roles}
+        grouped_by_target = self._get_registered_players_grouped_by_target_league(
+            target_guild, leagues
+        )
+        lines: list[str] = []
+        pop_stats: list[tuple[int, str]] = []
+
+        for name, min_elo, max_elo, min_kind, max_kind, role_id, discovered in reversed(leagues):
+            role = role_by_id.get(role_id) if role_id else None
+            role_display = role.mention if role else f"`{name}`"
+            range_display = self._format_range(min_elo, max_elo, min_kind, max_kind)
+            status = "discovered" if discovered else "undiscovered"
+            member_ids = grouped_by_target.get(role_id, []) if role_id else []
+            member_list, member_count = self._format_member_mentions_from_ids(
+                member_ids
+            )
+            if member_count > 0:
+                pop_stats.append((member_count, role_display))
+            lines.append(
+                f"{role_display}: **{range_display}** ({status}) — **{member_count}** player(s)\n{member_list}"
+            )
+
+        viewing_other = target_guild.id != ctx.guild.id
+        server_header = (
+            f"*Viewing **{discord.utils.escape_markdown(target_guild.name)}** (`{target_guild.id}`)*\n\n"
+            if viewing_other
+            else ""
+        )
+
+        description = server_header + "\n".join(lines)
+        description += "\n\n**Population notes**" + self._population_notes_suffix(
+            pop_stats
+        )
+
+        ann_lines = self._league_announce_channels_lines(target_guild)
+        description += "\n\n**League announcement channels**\n" + "\n".join(ann_lines)
+
+        await ctx.send(
+            embed=discord.Embed(
+                title="Leagues (Admin)",
+                description=description,
+                color=discord.Color.blurple(),
+            )
+        )
+
+    @commands.command(name="lhelp", help="Show help for all league-related commands.")
+    @commands.check(is_admin)
+    async def lhelp(self, ctx: commands.Context):
+        await ctx.send(
+            embed=discord.Embed(
+                title="League Commands Help",
+                description=(
+                    "**Commands**\n"
+                    "- `-ladd <number>`: Create league ranges and sync roles\n"
+                    "- `-lapply`: Re-apply league roles for all registered players\n"
+                    "- `-lcancel`: Cancel any running league task in this channel\n"
+                    "- `-lclear`: Remove all league roles from players and clear all leagues\n"
+                    "- `-lannounce <channel>`: Add a text channel for league promotion/demotion announcements (ID, #channel, or name)\n"
+                    "- `-lrannounce <channel>`: Remove a channel from that announcement list\n"
+                    "- `-ledit`: Edit league boundaries\n"
+                    "- `-leagues`: Show discovered leagues and their Elo ranges\n"
+                    "- `-ladmin`: Show all leagues\n\n"
+                    "**Required setup**\n"
+                    "- To start using this feature, grant the bot permission by doing:\n"
+                    "  `Server Settings` → `Roles` → `Elo Bot` → search and enable `Manage Roles`.\n"
+                    "- Then create the server roles for your leagues (e.g. `Diamond`, `Gold`, etc.).\n\n"
+                    "**Input format for `-ladd` reply**\n"
+                    "- `league_name minimum_elo maximum_elo [discovered]`\n"
+                    "- Use `l` as `minimum_elo` for **Lower** (from `maximum_elo` and below)\n"
+                    "- Use `h` as `maximum_elo` for **Higher** (from `minimum_elo` and above)\n"
+                    "- `discovered` is optional: `1` = discovered, `0` = undiscovered (default: `0`)\n\n"
+                    "**League name (role name)**\n"
+                    "- If the league name has **2+ characters**, `_` represents a space.\n"
+                    "  Example: `Diamond_League 900 h` matches a role named `Diamond League`.\n\n"
+                    "**Examples**\n"
+                    "```\n"
+                    "Silver l 599 1\n"
+                    "Gold 600 699 1\n"
+                    "Platinum 700 h 0\n"
+                    "```"
+                ),
+                color=discord.Color.blurple(),
+            )
+        )
+
+    async def cog_command_error(self, ctx: commands.Context, error: Exception):
+        if isinstance(error, commands.CheckFailure):
+            await ctx.send(
+                embed=discord.Embed(
+                    title="Permission Denied",
+                    description="You do not have permission to use this admin command.",
+                    color=discord.Color.red(),
+                )
+            )
+            return
+        raise error
+
+    @commands.command(
+        name="ledit",
+        help="Edit league boundaries while keeping leagues non-overlapping (admin only).",
+    )
+    @commands.check(is_admin)
+    async def ledit(self, ctx: commands.Context):
+        leagues = get_leagues(ctx.guild.id)
+        if len(leagues) < 2:
+            await ctx.send(
+                embed=discord.Embed(
+                    title="Not Enough Leagues",
+                    description="You need at least 2 leagues to edit boundaries. Use `-ladd` first.",
+                    color=discord.Color.red(),
+                )
+            )
+            return
+
+        cancel_event = self._try_begin_league_task(ctx)
+        if cancel_event is None:
+            await ctx.send(
+                embed=discord.Embed(
+                    title="League Task Already Running",
+                    description="You already have a league task running in this channel. Use `-lcancel` to cancel it.",
+                    color=discord.Color.red(),
+                )
+            )
+            return
+
+        mode = await self._ask_reply_number(
+            ctx,
+            discord.Embed(
+                title="League Editor",
+                description=(
+                    "Which edit mode would you like?\n"
+                    "- Reply `1`: Edit **one league**\n"
+                    "- Reply `2`: Edit **all leagues**\n\n"
+                    "Reply to this message with `1` or `2`."
+                ),
+                color=discord.Color.orange(),
+            ),
+            min_value=1,
+            max_value=2,
+            cancel_event=cancel_event,
+        )
+        if mode is None:
+            self._end_league_task(ctx)
+            return
+
+        if mode == 2:
+            leagues_sorted = sorted(
+                leagues,
+                key=lambda r: (
+                    self._effective_range(r[1], r[2], r[3], r[4])[0],
+                    self._effective_range(r[1], r[2], r[3], r[4])[1],
+                    r[0].lower(),
+                ),
+            )
+            role_by_id = {r.id: r for r in ctx.guild.roles}
+            current_lines: list[str] = []
+            for i, (
+                name,
+                min_elo,
+                max_elo,
+                min_kind,
+                max_kind,
+                role_id,
+                discovered,
+            ) in enumerate(leagues_sorted, start=1):
+                role_display = self._format_league_display(role_by_id, name, role_id)
+                rng = self._format_range(min_elo, max_elo, min_kind, max_kind)
+                status = "discovered" if discovered else "undiscovered"
+                current_lines.append(f"**{i}.** {role_display} — **{rng}** ({status})")
+
+            expected_lines = len(leagues_sorted)
+            example = "Silver l 599 1\nGold 600 699 1\nPlatinum 700 h 0"
+            prompt = await ctx.send(
+                embed=discord.Embed(
+                    title="Edit All Leagues",
+                    description=(
+                        "Current leagues:\n" + "\n".join(current_lines) + "\n\n"
+                        f"Please **reply** to this message with exactly **{expected_lines}** line(s).\n"
+                        "Each line must follow this format:\n"
+                        "`league_name minimum_elo maximum_elo [discovered]`\n\n"
+                        "Special values:\n"
+                        "- Use `l` as `minimum_elo` to mean **Lower** (from `maximum_elo` and below)\n"
+                        "- Use `h` as `maximum_elo` to mean **Higher** (from `minimum_elo` and above)\n"
+                        "- `discovered` (optional): `1` = discovered, `0` = undiscovered (default: `0`)\n\n"
+                        "League name:\n"
+                        "- If it has **2+ characters**, `_` represents a space. Example: `Diamond_League` → `Diamond League`\n\n"
+                        f"Example:\n```\n{example}\n```"
+                    ),
+                    color=discord.Color.orange(),
+                )
+            )
+
+            def check(m: discord.Message):
+                return (
+                    m.author.id == ctx.author.id
+                    and m.channel.id == ctx.channel.id
+                    and m.reference is not None
+                    and m.reference.message_id == prompt.id
+                )
+
+            message_task = asyncio.create_task(
+                self.bot.wait_for("message", timeout=300.0, check=check)
+            )
+            cancel_task = asyncio.create_task(cancel_event.wait())
+            try:
+                done, pending = await asyncio.wait(
+                    {message_task, cancel_task},
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                for t in pending:
+                    t.cancel()
+                if cancel_task in done and cancel_event.is_set():
+                    await ctx.send(
+                        embed=discord.Embed(
+                            title="Canceled",
+                            description="League task has been canceled.",
+                            color=discord.Color.red(),
+                        )
+                    )
+                    return
+                reply: discord.Message = message_task.result()
+            except Exception:
+                await ctx.send(
+                    embed=discord.Embed(
+                        title="Timeout",
+                        description="Timed out. Please run `-ledit` again.",
+                        color=discord.Color.red(),
+                    )
+                )
+                return
+            finally:
+                self._end_league_task(ctx)
+
+            raw_lines = [
+                ln.strip() for ln in (reply.content or "").splitlines() if ln.strip()
+            ]
+            if len(raw_lines) != int(expected_lines):
+                await ctx.send(
+                    embed=discord.Embed(
+                        title="Invalid Lines",
+                        description=f"Expected exactly **{expected_lines}** line(s), but received **{len(raw_lines)}**.",
+                        color=discord.Color.red(),
+                    )
+                )
+                return
+
+            leagues_to_store, bad_lines, missing_roles = self._parse_league_lines(
+                ctx, raw_lines
+            )
+
+            if bad_lines:
+                await ctx.send(
+                    embed=discord.Embed(
+                        title="Invalid League Lines",
+                        description="These lines have an invalid format:\n"
+                        + "\n".join(f"- `{x}`" for x in bad_lines),
+                        color=discord.Color.red(),
+                    )
+                )
+                return
+
+            if missing_roles:
+                await ctx.send(
+                    embed=discord.Embed(
+                        title="Missing League Roles",
+                        description=(
+                            "Could not find a server role for these leagues (skipped):\n"
+                            + "\n".join(f"- `{x}`" for x in missing_roles)
+                        ),
+                        color=discord.Color.red(),
+                    )
+                )
+
+            if not leagues_to_store:
+                await ctx.send(
+                    embed=discord.Embed(
+                        title="No Valid Leagues",
+                        description="No valid leagues to save.",
+                        color=discord.Color.red(),
+                    )
+                )
+                return
+
+            def _effective_range(
+                row: tuple[str, int | None, int | None, str, str, int | None, int],
+            ) -> tuple[int, int]:
+                _name, min_elo, max_elo, min_kind, max_kind, _role_id, _disc = row
+                low = -(10**18) if min_kind == "l" else int(min_elo)  # type: ignore[arg-type]
+                high = 10**18 if max_kind == "h" else int(max_elo)  # type: ignore[arg-type]
+                return low, high
+
+            sorted_rows = sorted(
+                leagues_to_store,
+                key=lambda r: (
+                    _effective_range(r)[0],
+                    _effective_range(r)[1],
+                    r[0].lower(),
+                ),
+            )
+            overlaps: list[str] = []
+            prev = None
+            for row in sorted_rows:
+                low, high = _effective_range(row)
+                if prev is not None:
+                    _p_low, p_high, p_name = prev
+                    if low <= p_high:
+                        overlaps.append(f"`{p_name}` overlaps `{row[0]}`")
+                prev = (low, high, row[0])
+
+            if overlaps:
+                await ctx.send(
+                    embed=discord.Embed(
+                        title="Overlapping Leagues",
+                        description=(
+                            "Each league must be strictly separate (no shared Elo).\n"
+                            "Fix these overlaps and try again:\n"
+                            + "\n".join(f"- {x}" for x in overlaps)
+                        ),
+                        color=discord.Color.red(),
+                    )
+                )
+                return
+
+            set_leagues(ctx.guild.id, leagues_to_store)
+            _u, _assigned_count, missing_from_db, apply_details = (
+                await self._apply_leagues(ctx.guild)
+            )
+
+            missing_all = sorted(set(missing_roles + missing_from_db))
+            desc = (
+                f"Saved **{len(leagues_to_store)}** league(s).\n\n" f"{apply_details}"
+            )
+            if missing_all:
+                desc += "\n\nLeague roles not found (skipped):\n" + "\n".join(
+                    f"- `{x}`" for x in missing_all
+                )
+
+            await ctx.send(
+                embed=discord.Embed(
+                    title="Leagues Updated",
+                    description=desc,
+                    color=discord.Color.green(),
+                )
+            )
+            return
+
+        # Mode 1 continues with interactive boundary edits; keep cancel enabled.
+
+        # Sort by effective range to get the real order.
+        leagues_sorted = sorted(
+            leagues,
+            key=lambda r: (
+                self._effective_range(r[1], r[2], r[3], r[4])[0],
+                self._effective_range(r[1], r[2], r[3], r[4])[1],
+                r[0].lower(),
+            ),
+        )
+
+        role_by_id = {r.id: r for r in ctx.guild.roles}
+        lines: list[str] = []
+        for i, (
+            name,
+            min_elo,
+            max_elo,
+            min_kind,
+            max_kind,
+            role_id,
+            discovered,
+        ) in enumerate(leagues_sorted, start=1):
+            role_display = self._format_league_display(role_by_id, name, role_id)
+            rng = self._format_range(min_elo, max_elo, min_kind, max_kind)
+            status = "discovered" if discovered else "undiscovered"
+            lines.append(f"**{i}.** {role_display} — **{rng}** ({status})")
+
+        idx = await self._ask_reply_number(
+            ctx,
+            discord.Embed(
+                title="League Editor",
+                description=(
+                    "Reply with the **number** of the league you want to adjust.\n\n"
+                    + "\n".join(lines)
+                ),
+                color=discord.Color.orange(),
+            ),
+            min_value=1,
+            max_value=len(leagues_sorted),
+            cancel_event=cancel_event,
+        )
+        if idx is None:
+            self._end_league_task(ctx)
+            return
+
+        sel_i = idx - 1
+        sel = leagues_sorted[sel_i]
+        (
+            sel_name,
+            sel_min,
+            sel_max,
+            sel_min_kind,
+            sel_max_kind,
+            sel_role_id,
+            sel_disc,
+        ) = sel
+        sel_display = self._format_league_display(role_by_id, sel_name, sel_role_id)
+        sel_range = self._format_range(sel_min, sel_max, sel_min_kind, sel_max_kind)
+        await ctx.send(
+            embed=discord.Embed(
+                title="Selected League",
+                description=f"Editing {sel_display} — **{sel_range}**",
+                color=discord.Color.blurple(),
+            )
+        )
+
+        # Helper to update two leagues in DB by name.
+        def _update_pair(
+            name_a: str,
+            min_a: int | None,
+            max_a: int | None,
+            min_kind_a: str,
+            max_kind_a: str,
+            name_b: str,
+            min_b: int | None,
+            max_b: int | None,
+            min_kind_b: str,
+            max_kind_b: str,
+        ) -> None:
+            with db_connection(ctx.guild.id) as (conn, cursor):
+                cursor.execute(
+                    "UPDATE leagues SET min_elo=?, max_elo=?, min_kind=?, max_kind=? WHERE name=?",
+                    (min_a, max_a, min_kind_a, max_kind_a, name_a),
+                )
+                cursor.execute(
+                    "UPDATE leagues SET min_elo=?, max_elo=?, min_kind=?, max_kind=? WHERE name=?",
+                    (min_b, max_b, min_kind_b, max_kind_b, name_b),
+                )
+                conn.commit()
+
+        # Case 1: smallest league -> edit its maximum_elo and set next minimum_elo = max+1
+        if sel_i == 0:
+            next_row = leagues_sorted[1]
+            n_name, n_min, n_max, n_min_kind, n_max_kind, n_role_id, n_disc = next_row
+            n_display = self._format_league_display(role_by_id, n_name, n_role_id)
+
+            new_max = await self._ask_reply_number(
+                ctx,
+                discord.Embed(
+                    title="Edit Lowest League",
+                    description=(
+                        f"Reply with the new **maximum_elo** for {sel_display}.\n"
+                        f"It will also set {n_display} minimum_elo to **(maximum_elo + 1)**."
+                    ),
+                    color=discord.Color.orange(),
+                ),
+                min_value=-1000000,
+                max_value=1000000,
+                cancel_event=cancel_event,
+            )
+            if new_max is None:
+                self._end_league_task(ctx)
+                return
+
+            # Apply: sel max = new_max; next min = new_max + 1 (normal or higher)
+            sel_new_min, sel_new_max = sel_min, int(new_max)
+            n_new_min = int(new_max) + 1
+            n_new_max = n_max
+
+            # If next is "Lower", that's invalid for a next league; keep kind but enforce min_elo set.
+            if n_min_kind == "l":
+                n_min_kind = "n"
+            if n_max_kind == "h":
+                # ok: open-ended upward, keep max_elo NULL
+                pass
+            else:
+                # normal: must have max >= min
+                if n_new_max is None or n_new_min > int(n_new_max):
+                    await ctx.send(
+                        embed=discord.Embed(
+                            title="Invalid Boundary",
+                            description="This change would make the next league invalid. Please choose a different value.",
+                            color=discord.Color.red(),
+                        )
+                    )
+                    return
+
+            _update_pair(
+                sel_name,
+                sel_new_min,
+                sel_new_max,
+                sel_min_kind,
+                "n",  # lowest league can't be Higher; keep as normal/lower depending on min_kind
+                n_name,
+                n_new_min,
+                n_new_max,
+                "n",
+                n_max_kind,
+            )
+            await ctx.send(
+                embed=discord.Embed(
+                    title="Boundary Applied",
+                    description=(
+                        f"{sel_display} (max) → **{sel_new_max}**\n"
+                        f"{n_display} (min) → **{n_new_min}**"
+                    ),
+                    color=discord.Color.blurple(),
+                )
+            )
+
+        # Case 2: largest league -> edit its minimum_elo and set prev maximum_elo = min-1
+        elif sel_i == len(leagues_sorted) - 1:
+            prev_row = leagues_sorted[-2]
+            p_name, p_min, p_max, p_min_kind, p_max_kind, p_role_id, p_disc = prev_row
+            p_display = self._format_league_display(role_by_id, p_name, p_role_id)
+
+            new_min = await self._ask_reply_number(
+                ctx,
+                discord.Embed(
+                    title="Edit Highest League",
+                    description=(
+                        f"Reply with the new **minimum_elo** for {sel_display}.\n"
+                        f"It will also set {p_display} maximum_elo to **(minimum_elo - 1)**."
+                    ),
+                    color=discord.Color.orange(),
+                ),
+                min_value=-1000000,
+                max_value=1000000,
+                cancel_event=cancel_event,
+            )
+            if new_min is None:
+                self._end_league_task(ctx)
+                return
+
+            sel_new_min = int(new_min)
+            p_new_max = int(new_min) - 1
+
+            # Validate prev league
+            if p_max_kind == "h":
+                p_max_kind = "n"
+            if p_min_kind == "l":
+                # ok: open-ended low, ensure max_elo set
+                pass
+            else:
+                if p_min is None or int(p_min) > p_new_max:
+                    await ctx.send(
+                        embed=discord.Embed(
+                            title="Invalid Boundary",
+                            description="This change would make the previous league invalid. Please choose a different value.",
+                            color=discord.Color.red(),
+                        )
+                    )
+                    return
+
+            _update_pair(
+                p_name,
+                p_min,
+                p_new_max,
+                p_min_kind,
+                "n",
+                sel_name,
+                sel_new_min,
+                sel_max,
+                "n",
+                sel_max_kind,
+            )
+            await ctx.send(
+                embed=discord.Embed(
+                    title="Boundary Applied",
+                    description=(
+                        f"{p_display} (max) → **{p_new_max}**\n"
+                        f"{sel_display} (min) → **{sel_new_min}**"
+                    ),
+                    color=discord.Color.blurple(),
+                )
+            )
+
+        # Case 3: middle league -> ask what to edit (min, max, or both)
+        else:
+            prev_row = leagues_sorted[sel_i - 1]
+            next_row = leagues_sorted[sel_i + 1]
+            p_name, p_min, p_max, p_min_kind, p_max_kind, p_role_id, p_disc = prev_row
+            n_name, n_min, n_max, n_min_kind, n_max_kind, n_role_id, n_disc = next_row
+            p_display = self._format_league_display(role_by_id, p_name, p_role_id)
+            n_display = self._format_league_display(role_by_id, n_name, n_role_id)
+
+            edit_mode = await self._ask_reply_number(
+                ctx,
+                discord.Embed(
+                    title="Edit Options",
+                    description=(
+                        f"You selected {sel_display}.\n\n"
+                        "What would you like to edit?\n"
+                        "- Reply `1` to edit **minimum_elo**\n"
+                        "- Reply `2` to edit **maximum_elo**\n"
+                        "- Reply `3` to edit **both**\n\n"
+                        "The bot will automatically adjust the adjacent league(s) by ±1 to keep leagues separate."
+                    ),
+                    color=discord.Color.orange(),
+                ),
+                min_value=1,
+                max_value=3,
+                cancel_event=cancel_event,
+            )
+            if edit_mode is None:
+                self._end_league_task(ctx)
+                return
+
+            # Edit minimum_elo (adjust previous maximum_elo = min-1)
+            if edit_mode == 1:
+                new_min = await self._ask_reply_number(
+                    ctx,
+                    discord.Embed(
+                        title="Edit minimum_elo",
+                        description=(
+                            f"Reply with the new **minimum_elo** for {sel_display}.\n"
+                            f"It will set {p_display} maximum_elo to **(minimum_elo - 1)**."
+                        ),
+                        color=discord.Color.orange(),
+                    ),
+                    min_value=-1000000,
+                    max_value=1000000,
+                    cancel_event=cancel_event,
+                )
+                if new_min is None:
+                    self._end_league_task(ctx)
+                    return
+
+                sel_new_min = int(new_min)
+                p_new_max = sel_new_min - 1
+
+                # Validate selected (min <= current max unless open-ended higher)
+                if sel_max_kind != "h" and (
+                    sel_max is None or sel_new_min > int(sel_max)
+                ):
+                    await ctx.send(
+                        embed=discord.Embed(
+                            title="Invalid Boundary",
+                            description="This change would make the selected league invalid.",
+                            color=discord.Color.red(),
+                        )
+                    )
+                    return
+
+                # Validate previous (min <= max)
+                if p_max_kind == "h":
+                    p_max_kind = "n"
+                if p_min_kind != "l" and (p_min is None or int(p_min) > p_new_max):
+                    await ctx.send(
+                        embed=discord.Embed(
+                            title="Invalid Boundary",
+                            description="This change would make the previous league invalid.",
+                            color=discord.Color.red(),
+                        )
+                    )
+                    return
+
+                _update_pair(
+                    p_name,
+                    p_min,
+                    p_new_max,
+                    p_min_kind,
+                    "n",
+                    sel_name,
+                    sel_new_min,
+                    sel_max,
+                    "n",
+                    sel_max_kind,
+                )
+                await ctx.send(
+                    embed=discord.Embed(
+                        title="Boundary Applied",
+                        description=(
+                            f"{p_display} (max) → **{p_new_max}**\n"
+                            f"{sel_display} (min) → **{sel_new_min}**"
+                        ),
+                        color=discord.Color.blurple(),
+                    )
+                )
+
+            # Edit maximum_elo (adjust next minimum_elo = max+1)
+            elif edit_mode == 2:
+                new_max = await self._ask_reply_number(
+                    ctx,
+                    discord.Embed(
+                        title="Edit maximum_elo",
+                        description=(
+                            f"Reply with the new **maximum_elo** for {sel_display}.\n"
+                            f"It will set {n_display} minimum_elo to **(maximum_elo + 1)**."
+                        ),
+                        color=discord.Color.orange(),
+                    ),
+                    min_value=-1000000,
+                    max_value=1000000,
+                    cancel_event=cancel_event,
+                )
+                if new_max is None:
+                    self._end_league_task(ctx)
+                    return
+
+                sel_new_max = int(new_max)
+                n_new_min = sel_new_max + 1
+
+                # Validate selected (current min <= new max)
+                if sel_min_kind == "l":
+                    sel_min_kind = "n"
+                if sel_min is None or int(sel_min) > sel_new_max:
+                    await ctx.send(
+                        embed=discord.Embed(
+                            title="Invalid Boundary",
+                            description="This change would make the selected league invalid.",
+                            color=discord.Color.red(),
+                        )
+                    )
+                    return
+
+                # Validate next (new min <= max unless open-ended higher)
+                if n_min_kind == "l":
+                    n_min_kind = "n"
+                if n_max_kind != "h" and (n_max is None or n_new_min > int(n_max)):
+                    await ctx.send(
+                        embed=discord.Embed(
+                            title="Invalid Boundary",
+                            description="This change would make the next league invalid.",
+                            color=discord.Color.red(),
+                        )
+                    )
+                    return
+
+                _update_pair(
+                    sel_name,
+                    sel_min,
+                    sel_new_max,
+                    "n",
+                    "n",
+                    n_name,
+                    n_new_min,
+                    n_max,
+                    "n",
+                    n_max_kind,
+                )
+                await ctx.send(
+                    embed=discord.Embed(
+                        title="Boundary Applied",
+                        description=(
+                            f"{sel_display} (max) → **{sel_new_max}**\n"
+                            f"{n_display} (min) → **{n_new_min}**"
+                        ),
+                        color=discord.Color.blurple(),
+                    )
+                )
+
+            # Edit both min and max (adjust prev.max = min-1 and next.min = max+1)
+            else:
+                new_min = await self._ask_reply_number(
+                    ctx,
+                    discord.Embed(
+                        title="Edit both (step 1/2)",
+                        description=f"Reply with the new **minimum_elo** for {sel_display}.",
+                        color=discord.Color.orange(),
+                    ),
+                    min_value=-1000000,
+                    max_value=1000000,
+                    cancel_event=cancel_event,
+                )
+                if new_min is None:
+                    self._end_league_task(ctx)
+                    return
+                new_max = await self._ask_reply_number(
+                    ctx,
+                    discord.Embed(
+                        title="Edit both (step 2/2)",
+                        description=f"Reply with the new **maximum_elo** for {sel_display}.",
+                        color=discord.Color.orange(),
+                    ),
+                    min_value=-1000000,
+                    max_value=1000000,
+                    cancel_event=cancel_event,
+                )
+                if new_max is None:
+                    self._end_league_task(ctx)
+                    return
+
+                sel_new_min = int(new_min)
+                sel_new_max = int(new_max)
+                if sel_new_min > sel_new_max:
+                    await ctx.send(
+                        embed=discord.Embed(
+                            title="Invalid Boundary",
+                            description="minimum_elo must be less than or equal to maximum_elo.",
+                            color=discord.Color.red(),
+                        )
+                    )
+                    return
+
+                p_new_max = sel_new_min - 1
+                n_new_min = sel_new_max + 1
+
+                if p_max_kind == "h":
+                    p_max_kind = "n"
+                if p_min_kind != "l" and (p_min is None or int(p_min) > p_new_max):
+                    await ctx.send(
+                        embed=discord.Embed(
+                            title="Invalid Boundary",
+                            description="This change would make the previous league invalid.",
+                            color=discord.Color.red(),
+                        )
+                    )
+                    return
+
+                if n_min_kind == "l":
+                    n_min_kind = "n"
+                if n_max_kind != "h" and (n_max is None or n_new_min > int(n_max)):
+                    await ctx.send(
+                        embed=discord.Embed(
+                            title="Invalid Boundary",
+                            description="This change would make the next league invalid.",
+                            color=discord.Color.red(),
+                        )
+                    )
+                    return
+
+                # Update prev + selected first, then selected + next
+                _update_pair(
+                    p_name,
+                    p_min,
+                    p_new_max,
+                    p_min_kind,
+                    "n",
+                    sel_name,
+                    sel_new_min,
+                    sel_new_max,
+                    "n",
+                    "n",
+                )
+                _update_pair(
+                    sel_name,
+                    sel_new_min,
+                    sel_new_max,
+                    "n",
+                    "n",
+                    n_name,
+                    n_new_min,
+                    n_max,
+                    "n",
+                    n_max_kind,
+                )
+                await ctx.send(
+                    embed=discord.Embed(
+                        title="Boundary Applied",
+                        description=(
+                            f"{p_display} (max) → **{p_new_max}**\n"
+                            f"{sel_display} (min,max) → **{sel_new_min} - {sel_new_max}**\n"
+                            f"{n_display} (min) → **{n_new_min}**"
+                        ),
+                        color=discord.Color.blurple(),
+                    )
+                )
+
+        # Final safety check: ensure no overlaps now
+        updated_leagues = get_leagues(ctx.guild.id)
+        updated_sorted = sorted(
+            updated_leagues,
+            key=lambda r: (
+                self._effective_range(r[1], r[2], r[3], r[4])[0],
+                self._effective_range(r[1], r[2], r[3], r[4])[1],
+                r[0].lower(),
+            ),
+        )
+        prev_high = None
+        for r in updated_sorted:
+            low, high = self._effective_range(r[1], r[2], r[3], r[4])
+            if prev_high is not None and low <= prev_high:
+                await ctx.send(
+                    embed=discord.Embed(
+                        title="Edit Rejected",
+                        description="This edit would create overlapping leagues. No changes were applied.",
+                        color=discord.Color.red(),
+                    )
+                )
+                return
+            prev_high = high
+
+        await self._apply_leagues(ctx.guild)
+        await ctx.send(
+            embed=discord.Embed(
+                title="League Updated",
+                description="League boundaries updated and roles synced.",
+                color=discord.Color.green(),
+            )
+        )
+        self._end_league_task(ctx)
+
+    @commands.command(
+        name="ladd",
+        help="Create league ranges and sync roles. Usage: -ladd <number>",
+    )
+    @commands.check(is_admin)
+    async def ladd(self, ctx: commands.Context, number: int):
+        if number <= 0 or number > 50:
+            await ctx.send(
+                embed=discord.Embed(
+                    title="Invalid Number",
+                    description="Use: `-ladd <number>` where number is between 1 and 50.",
+                    color=discord.Color.red(),
+                )
+            )
+            return
+
+        cancel_event = self._try_begin_league_task(ctx)
+        if cancel_event is None:
+            await ctx.send(
+                embed=discord.Embed(
+                    title="League Task Already Running",
+                    description="You already have a league task running in this channel. Use `-lcancel` to cancel it.",
+                    color=discord.Color.red(),
+                )
+            )
+            return
+
+        example = "Silver l 599 1\nGold 600 699 1\nPlatinum 700 h 0"
+        prompt = await ctx.send(
+            embed=discord.Embed(
+                title="League Setup",
+                description=(
+                    "Please **reply** to this message with exactly the number of lines you chose.\n"
+                    "Each line must follow this format:\n"
+                    "`league_name minimum_elo maximum_elo [discovered]`\n\n"
+                    "Special values:\n"
+                    "- Use `l` as `minimum_elo` to mean **Lower** (from `maximum_elo` and below)\n"
+                    "- Use `h` as `maximum_elo` to mean **Higher** (from `minimum_elo` and above)\n\n"
+                    "- `discovered` (optional): `1` = discovered, `0` = undiscovered (default: `0`)\n\n"
+                    "League name:\n"
+                    "- If it has **2+ characters**, `_` represents a space. Example: `Diamond_League` → `Diamond League`\n\n"
+                    "To cancel this setup, use `-lcancel`.\n\n"
+                    f"Example:\n```\n{example}\n```"
+                ),
+                color=discord.Color.orange(),
+            )
+        )
+
+        def check(m: discord.Message):
+            return (
+                m.author.id == ctx.author.id
+                and m.channel.id == ctx.channel.id
+                and m.reference is not None
+                and m.reference.message_id == prompt.id
+            )
+
+        try:
+            message_task = asyncio.create_task(
+                self.bot.wait_for("message", timeout=300.0, check=check)
+            )
+            cancel_task = asyncio.create_task(cancel_event.wait())
+            done, pending = await asyncio.wait(
+                {message_task, cancel_task},
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            for t in pending:
+                t.cancel()
+
+            if cancel_task in done and cancel_event.is_set():
+                await ctx.send(
+                    embed=discord.Embed(
+                        title="Canceled",
+                        description="League task has been canceled.",
+                        color=discord.Color.red(),
+                    )
+                )
+                return
+
+            reply: discord.Message = message_task.result()
+        except Exception:
+            await ctx.send(
+                embed=discord.Embed(
+                    title="Timeout",
+                    description="Timed out. Please run `-ladd` again.",
+                    color=discord.Color.red(),
+                )
+            )
+            return
+        finally:
+            self._end_league_task(ctx)
+
+        raw_lines = [
+            ln.strip() for ln in (reply.content or "").splitlines() if ln.strip()
+        ]
+        if len(raw_lines) != number:
+            await ctx.send(
+                embed=discord.Embed(
+                    title="Invalid Lines",
+                    description=f"Expected exactly **{number}** line(s), but received **{len(raw_lines)}**.",
+                    color=discord.Color.red(),
+                )
+            )
+            return
+
+        leagues_to_store, bad_lines, missing_roles = self._parse_league_lines(
+            ctx, raw_lines
+        )
+
+        if bad_lines:
+            await ctx.send(
+                embed=discord.Embed(
+                    title="Invalid League Lines",
+                    description="These lines have an invalid format:\n"
+                    + "\n".join(f"- `{x}`" for x in bad_lines),
+                    color=discord.Color.red(),
+                )
+            )
+            return
+
+        if missing_roles:
+            await ctx.send(
+                embed=discord.Embed(
+                    title="Missing League Roles",
+                    description=(
+                        "Could not find a server role for these leagues (skipped):\n"
+                        + "\n".join(f"- `{x}`" for x in missing_roles)
+                    ),
+                    color=discord.Color.red(),
+                )
+            )
+
+        if not leagues_to_store:
+            await ctx.send(
+                embed=discord.Embed(
+                    title="No Valid Leagues",
+                    description="No valid leagues to save.",
+                    color=discord.Color.red(),
+                )
+            )
+            return
+
+        # Validate that leagues do not overlap (inclusive ranges)
+        def _effective_range(
+            row: tuple[str, int | None, int | None, str, str, int | None, int],
+        ) -> tuple[int, int]:
+            _name, min_elo, max_elo, min_kind, max_kind, _role_id, _disc = row
+            low = -(10**18) if min_kind == "l" else int(min_elo)  # type: ignore[arg-type]
+            high = 10**18 if max_kind == "h" else int(max_elo)  # type: ignore[arg-type]
+            return low, high
+
+        sorted_rows = sorted(
+            leagues_to_store,
+            key=lambda r: (
+                _effective_range(r)[0],
+                _effective_range(r)[1],
+                r[0].lower(),
+            ),
+        )
+        overlaps: list[str] = []
+        prev = None
+        for row in sorted_rows:
+            low, high = _effective_range(row)
+            if prev is not None:
+                p_low, p_high, p_name = prev
+                # inclusive overlap if current.low <= prev.high
+                if low <= p_high:
+                    overlaps.append(f"`{p_name}` overlaps `{row[0]}`")
+            prev = (low, high, row[0])
+
+        if overlaps:
+            await ctx.send(
+                embed=discord.Embed(
+                    title="Overlapping Leagues",
+                    description=(
+                        "Each league must be strictly separate (no shared Elo).\n"
+                        "Fix these overlaps and try again:\n"
+                        + "\n".join(f"- {x}" for x in overlaps)
+                    ),
+                    color=discord.Color.red(),
+                )
+            )
+            return
+
+        set_leagues(ctx.guild.id, leagues_to_store)
+        _u, assigned_count, missing_from_db, apply_details = await self._apply_leagues(
+            ctx.guild
+        )
+        active_league_role_ids = {
+            rid
+            for (_name, _min, _max, _min_k, _max_k, rid, _d) in leagues_to_store
+            if rid and ctx.guild.get_role(rid) is not None
+        }
+        if not active_league_role_ids:
+            assigned_count = 0
+
+        missing_all = sorted(set(missing_roles + missing_from_db))
+        desc = f"Saved **{len(leagues_to_store)}** league(s).\n\n{apply_details}"
+        if missing_all:
+            desc += "\n\nLeague roles not found (skipped):\n" + "\n".join(
+                f"- `{x}`" for x in missing_all
+            )
+
+        await ctx.send(
+            embed=discord.Embed(
+                title="League Setup Completed",
+                description=desc,
+                color=discord.Color.green(),
+            )
+        )
+
+    @commands.command(
+        name="lapply",
+        help="Re-apply league roles for all registered players based on current Elo.",
+    )
+    @commands.check(is_admin)
+    async def lapply(self, ctx: commands.Context):
+        leagues = get_leagues(ctx.guild.id)
+        if not leagues:
+            await ctx.send(
+                embed=discord.Embed(
+                    title="No Leagues",
+                    description="No leagues are configured. Use `-ladd <number>` first.",
+                    color=discord.Color.red(),
+                )
+            )
+            return
+
+        _u, _assigned_count, missing_roles, apply_details = await self._apply_leagues(
+            ctx.guild, mark_populated_leagues_discovered=True
+        )
+        desc = apply_details
+        if missing_roles:
+            desc += "\n\nLeague roles not found (skipped):\n" + "\n".join(
+                f"- `{x}`" for x in sorted(set(missing_roles))
+            )
+
+        await ctx.send(
+            embed=discord.Embed(
+                title="League Apply Completed",
+                description=desc,
+                color=discord.Color.green(),
+            )
+        )
+
+    @commands.command(
+        name="lcancel",
+        help="Cancel any running league task in this channel.",
+    )
+    @commands.check(is_admin)
+    async def lcancel(self, ctx: commands.Context):
+        key = self._league_task_key(ctx)
+        ev = self._pending_league_task.get(key)
+        if not ev:
+            await ctx.send(
+                embed=discord.Embed(
+                    title="Nothing to Cancel",
+                    description="You don't have an active league task in this channel.",
+                    color=discord.Color.red(),
+                )
+            )
+            return
+
+        ev.set()
+
+    @commands.command(
+        name="lclear",
+        help="Remove all league roles from players and clear all leagues from the bot data.",
+    )
+    @commands.check(is_admin)
+    async def lclear(self, ctx: commands.Context):
+        cancel_event = self._try_begin_league_task(ctx)
+        if cancel_event is None:
+            await ctx.send(
+                embed=discord.Embed(
+                    title="League Task Already Running",
+                    description="You already have a league task running in this channel. Use `-lcancel` to cancel it.",
+                    color=discord.Color.red(),
+                )
+            )
+            return
+
+        leagues = get_leagues(ctx.guild.id)
+
+        if not leagues:
+            await ctx.send(
+                embed=discord.Embed(
+                    title="No Leagues",
+                    description="No leagues are configured. Nothing to clear.",
+                    color=discord.Color.red(),
+                )
+            )
+            self._end_league_task(ctx)
+            return
+
+        confirm_embed = discord.Embed(
+            title="Clear Leagues Confirmation",
+            description=(
+                f"**This will remove all league roles from players and clear {len(leagues)} league(s).** "
+                f"Are you sure? React with {YES_EMOJI} to confirm or {NO_EMOJI} to cancel within 5 minutes."
+            ),
+            color=discord.Color.orange(),
+        )
+        message = await ctx.send(embed=confirm_embed)
+        await message.add_reaction(YES_EMOJI)
+        await message.add_reaction(NO_EMOJI)
+
+        def check(reaction, user):
+            return (
+                user == ctx.author
+                and str(reaction.emoji) in [YES_EMOJI, NO_EMOJI]
+                and reaction.message.id == message.id
+            )
+
+        try:
+            reaction, _ = await self.bot.wait_for(
+                "reaction_add", timeout=300.0, check=check
+            )
+        except asyncio.TimeoutError:
+            await self._remove_bot_reactions(message)
+            await message.edit(embed=discord.Embed(
+                title="⌛ Timeout",
+                description="League clear confirmation timed out. Please try again.",
+                color=discord.Color.red(),
+            ))
+            self._end_league_task(ctx)
+            return
+
+        if str(reaction.emoji) != YES_EMOJI:
+            await self._remove_bot_reactions(message)
+            await message.edit(embed=discord.Embed(
+                title="League Clear Canceled",
+                description="League clear has been canceled.",
+                color=discord.Color.red(),
+            ))
+            self._end_league_task(ctx)
+            return
+
+        await self._remove_bot_reactions(message)
+        await message.edit(embed=discord.Embed(
+            title="Clearing Leagues...",
+            description="Removing league roles and clearing league data.",
+            color=discord.Color.blue(),
+        ))
+
+        role_ids: list[int] = sorted(
+            {rid for (_n, _mi, _ma, _mik, _mak, rid, _d) in leagues if rid}
+        )
+        role_by_id = {r.id: r for r in ctx.guild.roles}
+        roles_to_remove: list[discord.Role] = [
+            role_by_id[rid] for rid in role_ids if rid in role_by_id
+        ]
+
+        with db_connection(ctx.guild.id) as (conn, cursor):
+            cursor.execute("SELECT id FROM players")
+            player_rows = cursor.fetchall()
+
+        semaphore = asyncio.Semaphore(5)
+        removed_from_players = 0
+
+        async def _clear_one(user_id_raw: str) -> int:
+            if cancel_event.is_set():
+                return 0
+            try:
+                user_id = int(user_id_raw)
+            except Exception:
+                return 0
+
+            member = ctx.guild.get_member(user_id)
+            if member is None:
+                return 0
+
+            to_remove = [r for r in roles_to_remove if r in member.roles]
+            if not to_remove:
+                return 0
+
+            async with semaphore:
+                if cancel_event.is_set():
+                    return 0
+                try:
+                    await member.remove_roles(
+                        *to_remove, reason="League clear: remove all league roles"
+                    )
+                    return 1
+                except Exception:
+                    return 0
+
+        try:
+            tasks = [_clear_one(row[0]) for row in player_rows]
+            results = await asyncio.gather(*tasks, return_exceptions=False)
+            removed_from_players = int(sum(results))
+        finally:
+            self._end_league_task(ctx)
+
+        if cancel_event.is_set():
+            await ctx.send(
+                embed=discord.Embed(
+                    title="Canceled",
+                    description="League task has been canceled.",
+                    color=discord.Color.red(),
+                )
+            )
+            return
+
+        set_leagues(ctx.guild.id, [])
+
+        await ctx.send(
+            embed=discord.Embed(
+                title="Leagues Cleared",
+                description=(
+                    f"Removed league roles from **{removed_from_players}** player(s).\n"
+                    f"Cleared **{len(leagues)}** league(s) from the bot data."
+                ),
+                color=discord.Color.green(),
+            )
+        )
+
+    @commands.command(
+        name="lannounce",
+        help=(
+            "Add a text channel for league promotion/demotion announcements. "
+            "Usage: -lannounce <channel> — numeric ID, #channel-picker, mention, or name."
+        ),
+    )
+    @commands.check(is_admin)
+    async def lannounce(self, ctx: commands.Context, *, channel: discord.TextChannel):
+        prior = get_league_announce_channel_ids(ctx.guild.id)
+        if channel.id in prior:
+            lines = self._league_announce_channels_lines(ctx.guild)
+            await ctx.send(
+                embed=discord.Embed(
+                    title="Already Configured",
+                    description=(
+                        f"{channel.mention} is already a league announcement channel.\n\n"
+                        "**Current announcement channels:**\n" + "\n".join(lines)
+                    ),
+                    color=discord.Color.blurple(),
+                )
+            )
+            return
+
+        add_league_announce_channel_id(ctx.guild.id, channel.id)
+        lines = self._league_announce_channels_lines(ctx.guild)
+        await ctx.send(
+            embed=discord.Embed(
+                title="Announcement Channel Added",
+                description=(
+                    f"{channel.mention} will receive league promotion/demotion messages "
+                    "(alongside any other channels already configured).\n\n"
+                    "**Current announcement channels:**\n" + "\n".join(lines)
+                ),
+                color=discord.Color.green(),
+            )
+        )
+
+    @commands.command(
+        name="lrannounce",
+        help=(
+            "Remove a text channel from league announcement destinations. "
+            "Usage: same channel formats as `-lannounce`."
+        ),
+    )
+    @commands.check(is_admin)
+    async def lrannounce(self, ctx: commands.Context, *, channel: discord.TextChannel):
+        removed = remove_league_announce_channel_id(ctx.guild.id, channel.id)
+        if not removed:
+            await ctx.send(
+                embed=discord.Embed(
+                    title="Channel Not in List",
+                    description=(
+                        f"{channel.mention} is not configured as a league announcement "
+                        "channel."
+                    ),
+                    color=discord.Color.red(),
+                )
+            )
+            return
+
+        lines = self._league_announce_channels_lines(ctx.guild)
+        await ctx.send(
+            embed=discord.Embed(
+                title="Announcement Channel Removed",
+                description=(
+                    f"Removed {channel.mention} from league announcements.\n\n"
+                    "**Remaining channels:**\n" + "\n".join(lines)
+                ),
+                color=discord.Color.green(),
+            )
+        )
+
+
+
+async def setup(bot: commands.Bot):
+    await bot.add_cog(RolesCog(bot))

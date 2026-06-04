@@ -1,0 +1,40 @@
+# Environment variables
+.env
+
+# Virtual environment
+.venv/
+venv/
+
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Pytest
+.pytest_cache/
+
+# IDE
+.idea/
+.vscode/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Databases
+*.db
+databases/
+
+# Runtime leaderboard data
+lb/
+
+# Build artifacts
+build/
+dist/
+*.egg-info/
+
+# Font test images
+assets/_test_*.png
