@@ -5,6 +5,7 @@ Most cogs import symbols from `utils` for convenience.
 Internally, implementations live in submodules to match the project diagram.
 """
 
+from datetime import datetime, timezone
 from .elo import calculate_elo, calculate_win_rate  # noqa: F401
 from .guards import is_admin, is_valid_name  # noqa: F401
 from db.h2h_db import (  # noqa: F401
@@ -26,6 +27,7 @@ from .league import (  # noqa: F401
     add_league_announce_channel_id,
     format_league_stat_line,
     get_league_announce_channel_ids,
+    get_league_announce_channels,
     get_leagues,
     pick_league_role_id_for_elo,
     remove_league_announce_channel_id,
@@ -43,3 +45,24 @@ def sync_against_names(cursor, old_name: str, new_name: str) -> None:
     Caller is responsible for committing the transaction.
     """
     rename_opponent_in_h2h(cursor, old_name, new_name)
+
+
+def format_relative_time(dt: datetime) -> str:
+    now = datetime.now(timezone.utc)
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    diff = now - dt
+    seconds = int(diff.total_seconds())
+    if seconds < 0:
+        seconds = 0
+    
+    if seconds < 60:
+        return f"{seconds} seconds ago" if seconds > 1 else "just now"
+    minutes = seconds // 60
+    if minutes < 60:
+        return f"{minutes} minutes ago" if minutes > 1 else "1 minute ago"
+    hours = minutes // 60
+    if hours < 24:
+        return f"{hours} hours ago" if hours > 1 else "1 hour ago"
+    days = hours // 24
+    return f"{days} days ago" if days > 1 else "1 day ago"

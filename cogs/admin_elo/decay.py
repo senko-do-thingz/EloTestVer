@@ -10,7 +10,7 @@ from discord.ext import commands
 
 from config import YES_EMOJI, NO_EMOJI
 from db.elo_db import db_connection
-from utils import is_admin, sync_league_roles
+from utils import get_league_announce_channels, is_admin, sync_league_roles
 from utils.lb_cache import (
     invalidate as lb_cache_invalidate,
     schedule_rebuild as lb_cache_rebuild,
@@ -56,6 +56,54 @@ class AdminEloDecayCog(AdminEloBaseCog):
             self._apply_elo_decay_in_transaction(cursor)
             conn.commit()
 
+    async def _announce_league_changes(
+        self,
+        guild: discord.Guild,
+        league_changes: list[tuple[str, str, str]],
+    ) -> None:
+        """Send a single consolidated message summarizing all league changes after -decay.
+
+        Each line corresponds to one person, without tagging a Role -- only the
+        League name is written out:
+            Decay has been applied, League changes:
+
+            1. @A: from x to y
+            2. @B: from y to z
+        """
+        if not league_changes:
+            return
+
+        announce_channels = get_league_announce_channels(guild)
+        if not announce_channels:
+            return
+
+        lines = [
+            f"{i}. {mention}: from {old_name} to {new_name}"
+            for i, (mention, old_name, new_name) in enumerate(league_changes, start=1)
+        ]
+
+        header = "Decay has been applied, League changes:"
+        # Discord limits messages to 2000 characters -> split into multiple
+        # messages if there are too many changes, while keeping the original
+        # numbering on each line.
+        chunks: list[str] = []
+        current = header
+        for line in lines:
+            candidate = f"{current}\n\n{line}" if current == header else f"{current}\n{line}"
+            if len(candidate) > 1900:
+                chunks.append(current)
+                current = f"{header} (cont.)\n\n{line}"
+            else:
+                current = candidate
+        chunks.append(current)
+
+        for ch in announce_channels:
+            try:
+                for chunk in chunks:
+                    await ch.send(chunk)
+            except Exception:
+                pass
+
     # ------------------------------------------------------------------
     # Commands
     # ------------------------------------------------------------------
@@ -97,7 +145,11 @@ class AdminEloDecayCog(AdminEloBaseCog):
                     conn.commit()
                 lb_cache_invalidate(ctx.guild.id)
                 lb_cache_rebuild(self.bot, ctx.guild.id)
-                await sync_league_roles(ctx.guild, silent=True)
+                league_changes: list[tuple[str, str, str]] = []
+                await sync_league_roles(
+                    ctx.guild, silent=True, league_changes_out=league_changes
+                )
+                await self._announce_league_changes(ctx.guild, league_changes)
                 embed.title = "Elo Decay Applied"
                 embed.description = (
                     "Elo decay has been applied successfully, and monthly stats have been reset!"

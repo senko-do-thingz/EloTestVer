@@ -1,5 +1,6 @@
 import re
 import typing
+from datetime import datetime, timezone
 
 import discord
 from discord.ext import commands
@@ -16,10 +17,170 @@ STATS_ELO_LEADERBOARD_NOTE = (
     "*Play at least one set to be ranked on the Elo leaderboard.*"
 )
 
+ACCENT_COLOR = discord.Color.blue()
+
+
+class StatsRefreshButton(discord.ui.Button):
+    def __init__(self, custom_view):
+        super().__init__(style=discord.ButtonStyle.secondary, emoji="🔄")
+        self.custom_view = custom_view
+
+    async def callback(self, interaction: discord.Interaction):
+        self.custom_view.last_updated = datetime.now(timezone.utc)
+        await self.custom_view.update_stats(interaction)
+
+
+# Modified: StatsView giờ là LayoutView (Components V2) để nút Refresh nằm
+# NGAY TRONG khung viền màu (accessory của Section), giống thẻ bài OwO,
+# thay vì trôi nổi ở một action row tách biệt bên dưới embed.
+class StatsView(discord.ui.LayoutView):
+    def __init__(self, cog, ctx, user_id: int, had_target: bool):
+        super().__init__(timeout=3600.0)
+        self.cog = cog
+        self.ctx = ctx
+        self.user_id = user_id
+        self.had_target = had_target
+        self.last_updated = datetime.now(timezone.utc)
+        self.message = None
+        self.refresh_button = StatsRefreshButton(self)
+
+    async def update_stats(self, interaction_or_ctx):
+        with db_connection(self.ctx.guild.id) as (conn, cursor):
+            container = await self.cog.build_stats_container(
+                self.ctx,
+                cursor,
+                self.user_id,
+                self.had_target,
+                self.last_updated,
+                self.refresh_button,
+            )
+
+        self.clear_items()
+        self.add_item(container)
+
+        if isinstance(interaction_or_ctx, discord.Interaction):
+            await interaction_or_ctx.response.edit_message(view=self)
+            if interaction_or_ctx.message:
+                self.message = interaction_or_ctx.message
+            else:
+                try:
+                    self.message = await interaction_or_ctx.original_response()
+                except Exception:
+                    pass
+        else:
+            self.message = await interaction_or_ctx.send(view=self)
+
+    async def on_timeout(self) -> None:
+        self.refresh_button.disabled = True
+        if self.message:
+            try:
+                await self.message.edit(view=self)
+            except Exception:
+                pass
+
 
 class StatsCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
+
+    async def build_stats_container(
+        self,
+        ctx: commands.Context,
+        cursor,
+        user_id: int,
+        had_target: bool,
+        last_updated: datetime,
+        refresh_button: discord.ui.Button,
+    ) -> discord.ui.Container:
+        # Fetch fresh player data
+        row = self._get_player_data(cursor, user_id=user_id)
+        if not row:
+            # Should not happen but fallback gracefully
+            return discord.ui.Container(
+                discord.ui.TextDisplay("**Error**\nPlayer not found in database."),
+                accent_color=discord.Color.red(),
+            )
+
+        _uid, name, games_won, games_lost, elo, games_played_this_month = row[0]
+        player_id = str(user_id)
+        total_games = games_won + games_lost
+        win_rate = (games_won / total_games) * 100 if total_games > 0 else 0
+
+        cursor.execute("SELECT COUNT(*) FROM players WHERE elo > ?", (elo,))
+        rank = cursor.fetchone()[0] + 1
+
+        leagues = get_leagues(ctx.guild.id)
+        league_line = format_league_stat_line(
+            leagues, elo, games_won, games_lost, cursor
+        )
+        if total_games <= 0:
+            elo_line = "🔥 Elo: -"
+        else:
+            elo_line = f"🔥 Elo: {elo} (#{rank})"
+
+        # inline mention next to the player header (only when caller provided target)
+        mention_inline = ""
+        if had_target:
+            mention_inline = await self._safe_fetch_mention(user_id)
+
+        header = f"**{name}**"
+        if mention_inline:
+            header = f"{header} ({mention_inline})"
+
+        if total_games > 0:
+            most_played_with = get_most_played_with(cursor, player_id)
+            if most_played_with:
+                most_played_text = await self._format_most_played_with(
+                    ctx, most_played_with, cursor, player_id
+                )
+            else:
+                most_played_text = "Play at least 1 set to see your dream person"
+            tail = f"👥 Most Played: {most_played_text}"
+        else:
+            tail = STATS_ELO_LEADERBOARD_NOTE
+
+        body = (
+            f"## Player Statistics\n"
+            f"{header}\n"
+            f"{elo_line}\n"
+            f"{league_line}\n"
+            f"🏆 Games Won: {games_won}\n"
+            f"💀 Games Lost: {games_lost}\n"
+            f"🎮 Monthly Games Played: {games_played_this_month}\n"
+            f"📊 Win Rate: {win_rate:.2f}%\n"
+            f"{tail}"
+        )
+
+        avatar_url = await self._get_display_avatar_url(
+            ctx,
+            None,
+            user_id,
+        )
+
+        container = discord.ui.Container(accent_color=ACCENT_COLOR)
+        if avatar_url:
+            container.add_item(
+                discord.ui.Section(
+                    discord.ui.TextDisplay(body),
+                    accessory=discord.ui.Thumbnail(avatar_url),
+                )
+            )
+        else:
+            container.add_item(discord.ui.TextDisplay(body))
+
+        container.add_item(discord.ui.Separator())
+        # Modified: "Last updated" dùng <t:...:R> (TextDisplay hỗ trợ markdown)
+        # nên Discord tự cập nhật thời gian tương đối, không cần bot edit lại.
+        container.add_item(
+            discord.ui.Section(
+                discord.ui.TextDisplay(
+                    f"Last updated: <t:{int(last_updated.timestamp())}:R>"
+                ),
+                accessory=refresh_button,
+            )
+        )
+
+        return container
 
     async def _get_display_avatar_url(
         self,
@@ -40,12 +201,6 @@ class StatsCog(commands.Cog):
             return fetched.display_avatar.url
         except Exception:
             return None
-
-    def _apply_stats_avatar(
-        self, embed: discord.Embed, avatar_url: str | None
-    ) -> None:
-        if avatar_url:
-            embed.set_thumbnail(url=avatar_url)
 
     async def _safe_fetch_mention(
         self, user_obj_or_id: typing.Union[discord.User, discord.Member, int]
@@ -72,8 +227,14 @@ class StatsCog(commands.Cog):
 
         formatted_list = []
         for name in most_played_with:
-            # Get user ID from database
-            cursor.execute("SELECT id FROM players WHERE name = ?", (name,))
+            # Get user ID from database. Match case-insensitively and ignore
+            # leading/trailing whitespace so a stale exact-match (e.g. from a
+            # name with different casing or stray whitespace/unicode) doesn't
+            # silently drop the opponent's mention.
+            cursor.execute(
+                "SELECT id FROM players WHERE TRIM(name) = TRIM(?) COLLATE NOCASE",
+                (name,),
+            )
             row = cursor.fetchone()
             games = get_opponent_games(cursor, player_id, name)
             if row:
@@ -173,9 +334,8 @@ class StatsCog(commands.Cog):
         target,
         had_target: bool,
     ) -> None:
+        user_id = None
         data_from_search = False
-        user_id_for_mention = None
-        player_id: str | None = None
 
         if search_name:
             matches = self._get_player_data(cursor, search_name=search_name)
@@ -189,18 +349,7 @@ class StatsCog(commands.Cog):
                 )
                 return
             if len(matches) == 1:
-                (
-                    user_id_for_mention,
-                    name,
-                    games_won,
-                    games_lost,
-                    elo,
-                    games_played_this_month,
-                ) = matches[0]
-                player_id = str(user_id_for_mention)
-                user = ctx.guild.get_member(user_id_for_mention) or (
-                    await self.bot.fetch_user(user_id_for_mention) if True else None
-                )
+                user_id = matches[0][0]
                 data_from_search = True
             else:
                 player_list = []
@@ -247,78 +396,15 @@ class StatsCog(commands.Cog):
                 await ctx.send(
                     embed=discord.Embed(
                         title="Player Not Registered",
-                        description=f"{mention_text} is not registered. Use `-register <name>` to sign up!",
+                        description=f"{mention_text} is not registered. Use `-register <n>` to sign up!",
                         color=discord.Color.red(),
                     )
                 )
                 return
-            _uid, name, games_won, games_lost, elo, games_played_this_month = row[0]
-            player_id = str(user.id)
-            # only include mention inline if caller explicitly provided a target
-            if had_target:
-                user_id_for_mention = user.id
+            user_id = user.id
 
-        total_games = games_won + games_lost
-        win_rate = (games_won / total_games) * 100 if total_games > 0 else 0
-
-        cursor.execute("SELECT COUNT(*) FROM players WHERE elo > ?", (elo,))
-        rank = cursor.fetchone()[0] + 1
-
-        leagues = get_leagues(ctx.guild.id)
-        league_line = format_league_stat_line(
-            leagues, elo, games_won, games_lost, cursor
-        )
-        if total_games <= 0:
-            elo_line = "🔥 Elo: -"
-        else:
-            elo_line = f"🔥 Elo: {elo} (#{rank})"
-
-        # inline mention next to the player header (only when caller provided target)
-        mention_inline = ""
-        if user_id_for_mention:
-            mention_inline = await self._safe_fetch_mention(
-                user if user is not None else user_id_for_mention
-            )
-
-        header = f"**{name}**"
-        if mention_inline:
-            header = f"{header} ({mention_inline})"
-
-        if total_games > 0 and player_id:
-            most_played_with = get_most_played_with(cursor, player_id)
-            if most_played_with:
-                most_played_text = await self._format_most_played_with(
-                    ctx, most_played_with, cursor, player_id
-                )
-            else:
-                most_played_text = "Play at least 1 set to see your dream person"
-            tail = f"👥 Most Played: {most_played_text}"
-        else:
-            tail = STATS_ELO_LEADERBOARD_NOTE
-
-        description = (
-            f"{header}\n"
-            f"{elo_line}\n"
-            f"{league_line}\n"
-            f"🏆 Games Won: {games_won}\n"
-            f"💀 Games Lost: {games_lost}\n"
-            f"🎮 Monthly Games Played: {games_played_this_month}\n"
-            f"📊 Win Rate: {win_rate:.2f}%\n"
-            f"{tail}"
-        )
-
-        embed = discord.Embed(
-            title="Player Statistics",
-            description=description,
-            color=discord.Color.blue(),
-        )
-        avatar_url = await self._get_display_avatar_url(
-            ctx,
-            user if isinstance(user, (discord.User, discord.Member)) else None,
-            int(player_id) if player_id else None,
-        )
-        self._apply_stats_avatar(embed, avatar_url)
-        await ctx.send(embed=embed)
+        view = StatsView(self, ctx, user_id, had_target)
+        await view.update_stats(ctx)
 
     @commands.command(help="View player stats by Discord ID.")
     async def stats_id(self, ctx: commands.Context, discord_id: str):
@@ -343,64 +429,14 @@ class StatsCog(commands.Cog):
                 await ctx.send(
                     embed=discord.Embed(
                         title="Player Not Registered",
-                        description=f"{mention_inline} is not registered. Use `-register <name>` to sign up!",
+                        description=f"{mention_inline} is not registered. Use `-register <n>` to sign up!",
                         color=discord.Color.red(),
                     )
                 )
                 return
 
-            _uid, name, games_won, games_lost, elo, games_played_this_month = row[0]
-            player_id = str(user_id)
-            total_games = games_won + games_lost
-            win_rate = (games_won / total_games) * 100 if total_games > 0 else 0
-            cursor.execute("SELECT COUNT(*) FROM players WHERE elo > ?", (elo,))
-            rank = cursor.fetchone()[0] + 1
-
-            leagues = get_leagues(ctx.guild.id)
-            league_line = format_league_stat_line(
-                leagues, elo, games_won, games_lost, cursor
-            )
-            if total_games <= 0:
-                elo_line = "🔥 Elo: -"
-            else:
-                elo_line = f"🔥 Elo: {elo} (#{rank})"
-
-            header = f"**{name}**"
-            if mention_inline:
-                header = f"{header} ({mention_inline})"
-
-            if total_games > 0:
-                most_played_with = get_most_played_with(cursor, player_id)
-                if most_played_with:
-                    most_played_text = await self._format_most_played_with(
-                        ctx, most_played_with, cursor, player_id
-                    )
-                else:
-                    most_played_text = "Play at least 1 set to see your dream person"
-                tail = f"👥 Most Played: {most_played_text}"
-            else:
-                tail = STATS_ELO_LEADERBOARD_NOTE
-
-            description = (
-                f"{header}\n"
-                f"{elo_line}\n"
-                f"{league_line}\n"
-                f"🏆 Games Won: {games_won}\n"
-                f"💀 Games Lost: {games_lost}\n"
-                f"🎮 Monthly Games Played: {games_played_this_month}\n"
-                f"📊 Win Rate: {win_rate:.2f}%\n"
-                f"{tail}"
-            )
-
-        embed = discord.Embed(
-            title="Player Statistics",
-            description=description,
-            color=discord.Color.blue(),
-        )
-        avatar_url = await self._get_display_avatar_url(ctx, None, user_id)
-        self._apply_stats_avatar(embed, avatar_url)
-        await ctx.send(embed=embed)
-
+        view = StatsView(self, ctx, user_id, had_target=True)
+        await view.update_stats(ctx)
 
 
 async def setup(bot: commands.Bot):

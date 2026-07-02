@@ -1,4 +1,5 @@
 import io
+from datetime import datetime, timezone
 
 import discord
 from discord.ext import commands
@@ -10,65 +11,42 @@ import logging
 
 logger = logging.getLogger(__name__)
 
+# Màu viền của Container, tương đương embed.color trước đây
+ACCENT_COLOR = discord.Color.blue()
 
-def _build_leaderboard_embed(
-    title: str,
-    entries: list[tuple[int, str, str] | tuple[int, str, str, bool]],
-    *,
-    page: int | None = None,
-    total_pages: int | None = None,
-    note: str | None = None,
-) -> tuple[discord.Embed, discord.File]:
-    filename = "leaderboard.png"
 
-    # Thử lấy từ cache trước (chỉ có khi KHÔNG có highlight cá nhân)
-    # Cache rebuild không biết user nào highlight nên ta render fresh khi cần
-    buf = render_leaderboard_image(entries, title=title, page=page, total_pages=total_pages)
-
-    file = discord.File(buf, filename=filename)
-    embed = discord.Embed(color=discord.Color.blue())
-    embed.set_image(url=f"attachment://{filename}")
+def _footer_text(last_updated: datetime | None, note: str | None) -> str:
+    """Dòng 'Last updated' + note, dùng <t:...:R> để Discord tự cập nhật
+    thời gian tương đối (client-side), không cần bot edit lại message."""
+    lines = []
+    if last_updated:
+        lines.append(f"Last updated: <t:{int(last_updated.timestamp())}:R>")
     if note:
-        embed.set_footer(text=note)
-    return embed, file
-
-
-def _build_embed_from_bytes(
-    png_bytes: bytes,
-    *,
-    note: str | None = None,
-) -> tuple[discord.Embed, discord.File]:
-    """Tạo embed trực tiếp từ cached PNG bytes, không cần render lại."""
-    filename = "leaderboard.png"
-    file = discord.File(io.BytesIO(png_bytes), filename=filename)
-    embed = discord.Embed(color=discord.Color.blue())
-    embed.set_image(url=f"attachment://{filename}")
-    if note:
-        embed.set_footer(text=note)
-    return embed, file
+        lines.append(note)
+    return "\n".join(lines) if lines else "\u200b"
 
 
 class LeaderboardDropdown(discord.ui.Select):
-    def __init__(self, view):
+    def __init__(self, custom_view):
         options = [
             discord.SelectOption(
-                label="🏆 Top Elo", value="elo", description="Players with the highest Elo"
+                label="🏆 Elo", value="elo", description="Players with the highest Elo"
             ),
             discord.SelectOption(
-                label="🥇 Top Wins", value="wins", description="Players with the most wins"
+                label="🥇 Wins", value="wins", description="Players with the most wins"
             ),
             discord.SelectOption(
-                label="💀 Top Losses",
+                label="💀 Losses",
                 value="losses",
                 description="Players with the most losses",
             ),
             discord.SelectOption(
-                label="📊 Top Win Rate",
+                label="📊 Win Rate",
                 value="win_rate",
                 description="Players with the highest win rate",
             ),
             discord.SelectOption(
-                label="🎮 Top Monthly Games Played",
+                label="🎮 Monthly Games Played",
                 value="games_played_this_month",
                 description="Players with the most monthly games played",
             ),
@@ -79,7 +57,7 @@ class LeaderboardDropdown(discord.ui.Select):
             max_values=1,
             options=options,
         )
-        self.custom_view = view
+        self.custom_view = custom_view
 
     async def callback(self, interaction: discord.Interaction):
         self.custom_view.category = self.values[0]
@@ -107,7 +85,20 @@ class NextPageButton(discord.ui.Button):
         await self.custom_view.update_leaderboard(interaction)
 
 
-class LeaderboardView(discord.ui.View):
+class LeaderboardRefreshButton(discord.ui.Button):
+    def __init__(self, custom_view):
+        super().__init__(style=discord.ButtonStyle.secondary, emoji="🔄")
+        self.custom_view = custom_view
+
+    async def callback(self, interaction: discord.Interaction):
+        self.custom_view.last_updated = datetime.now(timezone.utc)
+        await self.custom_view.update_leaderboard(interaction)
+
+
+# Modified: LeaderboardView giờ là LayoutView (Components V2) thay vì View +
+# embed, để có thể đặt nút Refresh làm accessory NẰM TRONG Container (khung
+# viền màu, giống thẻ bài của OwO) thay vì trôi nổi ở một action row riêng.
+class LeaderboardView(discord.ui.LayoutView):
     def __init__(
         self,
         ctx,
@@ -116,7 +107,7 @@ class LeaderboardView(discord.ui.View):
         *,
         db_guild_id: int | None = None,
     ):
-        super().__init__()
+        super().__init__(timeout=3600.0)
         self.ctx = ctx
         self.db_guild_id = db_guild_id if db_guild_id is not None else ctx.guild.id
         self.category = category
@@ -124,12 +115,27 @@ class LeaderboardView(discord.ui.View):
         self.per_page = 10
         self.total_pages = 1
         self.target_user_id = ctx.author.id
-        self.add_item(LeaderboardDropdown(self))
-        self.add_item(PreviousPageButton(self))
-        self.add_item(NextPageButton(self))
+        self.last_updated = datetime.now(timezone.utc)
+        self.message = None
+
+        # Các item tương tác được tạo 1 lần, giữ nguyên instance qua mỗi lần
+        # render lại layout (chỉ đổi chỗ gắn vào row/container mới).
+        self.dropdown = LeaderboardDropdown(self)
+        self.prev_button = PreviousPageButton(self)
+        self.next_button = NextPageButton(self)
+        self.refresh_button = LeaderboardRefreshButton(self)
+
+    async def on_timeout(self) -> None:
+        for item in (self.dropdown, self.prev_button, self.next_button, self.refresh_button):
+            item.disabled = True
+        if self.message:
+            try:
+                await self.message.edit(view=self)
+            except Exception:
+                pass
 
     def _title_prefix(self) -> str:
-        return "Lb - "
+        return "Leaderboard - "
 
     def _dev_note(self, note_text: str | None) -> str | None:
         if self.db_guild_id != self.ctx.guild.id:
@@ -137,9 +143,43 @@ class LeaderboardView(discord.ui.View):
             return f"{note_text}\n{dev}" if note_text else dev
         return note_text
 
+    def _rebuild_layout(self, filename: str, note: str | None) -> None:
+        """Dựng lại toàn bộ layout: Container (ảnh bảng xếp hạng + Refresh
+        nằm trong khung) + action row dropdown + action row Prev/Next."""
+        self.clear_items()
+
+        container = discord.ui.Container(accent_color=ACCENT_COLOR)
+        container.add_item(
+            discord.ui.MediaGallery(discord.MediaGalleryItem(media=f"attachment://{filename}"))
+        )
+        container.add_item(discord.ui.Separator())
+        container.add_item(
+            discord.ui.Section(
+                discord.ui.TextDisplay(_footer_text(self.last_updated, note)),
+                accessory=self.refresh_button,
+            )
+        )
+        self.add_item(container)
+
+        self.add_item(discord.ui.ActionRow(self.dropdown))
+        self.add_item(discord.ui.ActionRow(self.prev_button, self.next_button))
+
     async def update_leaderboard(self, interaction_or_ctx):
         with db_connection(self.db_guild_id) as (conn, cursor):
             await self._render_leaderboard(interaction_or_ctx, cursor)
+
+    async def _send_or_edit(self, interaction_or_ctx, file: discord.File) -> None:
+        if isinstance(interaction_or_ctx, discord.Interaction):
+            await interaction_or_ctx.response.edit_message(view=self, attachments=[file])
+            if interaction_or_ctx.message:
+                self.message = interaction_or_ctx.message
+            else:
+                try:
+                    self.message = await interaction_or_ctx.original_response()
+                except Exception:
+                    pass
+        else:
+            self.message = await interaction_or_ctx.send(view=self, file=file)
 
     async def _render_leaderboard(self, interaction_or_ctx, cursor) -> None:
         cursor.execute(
@@ -156,10 +196,10 @@ class LeaderboardView(discord.ui.View):
 
         note_text = None
         title = ""
+        display_players: list[tuple[int, str, int]] = []
 
-        display_players: list[tuple[int, str, float]] = []
         if self.category == "elo":
-            title = "Top Elo"
+            title = "Elo"
             cursor.execute(
                 "SELECT id, name, elo, games_won, games_lost FROM players ORDER BY elo DESC"
             )
@@ -173,7 +213,7 @@ class LeaderboardView(discord.ui.View):
                 note_text = "Play at least one set to be ranked"
 
         elif self.category == "wins":
-            title = "Top Wins"
+            title = "Wins"
             cursor.execute(
                 "SELECT id, name, games_won FROM players ORDER BY games_won DESC"
             )
@@ -187,7 +227,7 @@ class LeaderboardView(discord.ui.View):
                 note_text = "Win at least one game to be ranked"
 
         elif self.category == "losses":
-            title = "Top Losses"
+            title = "Losses"
             cursor.execute(
                 "SELECT id, name, games_lost FROM players ORDER BY games_lost DESC"
             )
@@ -201,7 +241,7 @@ class LeaderboardView(discord.ui.View):
                 note_text = "Lose at least one game to be ranked"
 
         elif self.category == "win_rate":
-            title = "Top Win Rate"
+            title = "Win Rate"
             cursor.execute(
                 "SELECT id, name, games_won, games_lost FROM players"
             )
@@ -218,7 +258,7 @@ class LeaderboardView(discord.ui.View):
                 note_text = "Play at least ten games to be ranked"
 
         elif self.category == "games_played_this_month":
-            title = "Top Monthly Games Played"
+            title = "Monthly Games Played"
             cursor.execute(
                 "SELECT id, name, games_played_this_month, games_won, games_lost "
                 "FROM players ORDER BY games_played_this_month DESC"
@@ -254,12 +294,12 @@ class LeaderboardView(discord.ui.View):
         # Kiểm tra xem user có trong trang này không (để highlight)
         target_in_page = any(pid == self.target_user_id for pid, _, _ in page_players)
 
-        self.children[1].disabled = self.page == 0
-        self.children[2].disabled = self.page >= self.total_pages - 1
+        self.prev_button.disabled = self.page == 0
+        self.next_button.disabled = self.page >= self.total_pages - 1
+
+        filename = "leaderboard.png"
 
         # --- Dùng cache nếu user không nằm trong trang (không cần highlight) ---
-        # Cache được rebuild không có highlight; khi user có trong trang thì
-        # phải render fresh để thêm highlight row đúng người.
         use_cache = (
             not target_in_page
             and self.db_guild_id == self.ctx.guild.id  # không cache cross-server lb
@@ -272,13 +312,9 @@ class LeaderboardView(discord.ui.View):
                     "LB serve  HIT  guild=%s category=%s page=%d user=%s",
                     self.db_guild_id, self.category, self.page, self.target_user_id,
                 )
-                embed, file = _build_embed_from_bytes(cached, note=self._dev_note(note_text))
-                if isinstance(interaction_or_ctx, discord.Interaction):
-                    await interaction_or_ctx.response.edit_message(
-                        embed=embed, attachments=[file], view=self
-                    )
-                else:
-                    await interaction_or_ctx.send(embed=embed, file=file, view=self)
+                file = discord.File(io.BytesIO(cached), filename=filename)
+                self._rebuild_layout(filename, self._dev_note(note_text))
+                await self._send_or_edit(interaction_or_ctx, file)
                 return
             else:
                 logger.debug(
@@ -298,37 +334,29 @@ class LeaderboardView(discord.ui.View):
             stat_str = f"{stat:.2f}" if self.category == "win_rate" else str(stat)
             entries.append((rank, name, stat_str, pid == self.target_user_id))
 
-        embed, file = _build_leaderboard_embed(
-            f"{self._title_prefix()}{title}",
+        buf = render_leaderboard_image(
             entries,
+            title=f"{self._title_prefix()}{title}",
             page=self.page + 1,
             total_pages=self.total_pages,
-            note=self._dev_note(note_text),
         )
-
-        if isinstance(interaction_or_ctx, discord.Interaction):
-            await interaction_or_ctx.response.edit_message(
-                embed=embed, attachments=[file], view=self
-            )
-        else:
-            await interaction_or_ctx.send(embed=embed, file=file, view=self)
+        file = discord.File(buf, filename=filename)
+        self._rebuild_layout(filename, self._dev_note(note_text))
+        await self._send_or_edit(interaction_or_ctx, file)
 
 
 class LeaderboardCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
 
-    @commands.command(help="Show the top 10 players on the leaderboard with sorting options.")
+    @commands.command(
+        name="leaderboard",
+        aliases=["lb"],
+        help="Show the top 10 players on the leaderboard with sorting options."
+    )
     async def leaderboard(self, ctx: commands.Context):
         view = LeaderboardView(ctx)
         await view.update_leaderboard(ctx)
-
-    @commands.command(
-        name="lb",
-        help="Show the top 10 players on the leaderboard with sorting options (alias for leaderboard).",
-    )
-    async def lb(self, ctx: commands.Context):
-        await self.leaderboard(ctx)
 
 
 async def setup(bot: commands.Bot):

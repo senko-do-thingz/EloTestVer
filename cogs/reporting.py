@@ -340,7 +340,7 @@ class ReportingCog(commands.Cog):
                     f"🏆 {winner_name}: **{preview_new_winner_elo}** ({preview_winner_elo} + {preview_winner_delta})\n"
                     f"💀 {loser_name}: **{preview_new_loser_elo}** ({preview_loser_elo} - {abs(preview_loser_delta)})\n"
                     f"{comparison_text}\n"
-                    f"Both players, please react with {YES_EMOJI} to confirm or {NO_EMOJI} to cancel within 5 minutes."
+                    f"Both players, please react with {YES_EMOJI} to confirm or {NO_EMOJI} to cancel within 1 hour." # Modified: increased timeout to 1 hour
                 ),
                 color=discord.Color.orange(),
             )
@@ -359,7 +359,8 @@ class ReportingCog(commands.Cog):
             confirmed = False
             try:
                 while True:
-                    reaction, user = await self.bot.wait_for("reaction_add", timeout=300.0, check=check)
+                    # Modified: increased wait_for timeout from 300.0 (5 min) to 3600.0 (1 hour)
+                    reaction, user = await self.bot.wait_for("reaction_add", timeout=3600.0, check=check)
                     reactions[str(reaction.emoji)].add(user)
 
                     if winner in reactions[YES_EMOJI] and loser in reactions[YES_EMOJI]:
@@ -622,7 +623,7 @@ class ReportingCog(commands.Cog):
                     f"**New Elo Ratings Preview:**\n"
                     f"🏆 {winner_name}: **{new_winner_elo}** ({winner_elo} + {winner_delta})\n"
                     f"💀 {loser_name}: **{new_loser_elo}** ({loser_elo} - {abs(loser_delta)})\n\n"
-                    f"Admin ({ctx.author.mention}), please react with {YES_EMOJI} to confirm or {NO_EMOJI} to cancel within 5 minutes."
+                    f"Admin ({ctx.author.mention}), please react with {YES_EMOJI} to confirm or {NO_EMOJI} to cancel within 1 hour." # Modified: increased timeout to 1 hour
                 ),
                 color=discord.Color.orange(),
             )
@@ -638,7 +639,8 @@ class ReportingCog(commands.Cog):
                 )
 
             try:
-                reaction, _ = await self.bot.wait_for("reaction_add", timeout=300.0, check=check)
+                # Modified: increased wait_for timeout from 300.0 (5 min) to 3600.0 (1 hour)
+                reaction, _ = await self.bot.wait_for("reaction_add", timeout=3600.0, check=check)
                 if str(reaction.emoji) != YES_EMOJI:
                     await self._remove_bot_reactions(message)
                     await message.edit(embed=discord.Embed(
@@ -889,3 +891,4 @@ class ReportingCog(commands.Cog):
 
 async def setup(bot: commands.Bot):
     await bot.add_cog(ReportingCog(bot))
+    

@@ -168,6 +168,14 @@ def remove_league_announce_channel_id(guild_id: int, channel_id: int) -> bool:
     return True
 
 
+def get_league_announce_channels(guild: discord.Guild) -> list[discord.TextChannel]:
+    """Resolve saved announce-channel IDs into actual TextChannel objects for the guild."""
+    return [
+        ch for ch in (guild.get_channel(cid) for cid in get_league_announce_channel_ids(guild.id))
+        if isinstance(ch, discord.TextChannel)
+    ]
+
+
 # ---------------------------------------------------------------------------
 # Role sync helpers
 # ---------------------------------------------------------------------------
@@ -183,8 +191,8 @@ def _build_effective_leagues(
     list[str],
 ]:
     """
-    Lọc leagues có role hợp lệ và xây dựng các lookup structure.
-    Trả về (effective_leagues, league_role_ids, role_id_to_name, role_rank, missing_names).
+    Filter leagues that have a valid role and build lookup structures.
+    Returns (effective_leagues, league_role_ids, role_id_to_name, role_rank, missing_names).
     """
     role_by_id = {r.id: r for r in guild.roles}
     effective_leagues = []
@@ -222,12 +230,19 @@ async def _sync_member_role(
     discovered_role_ids: set[int],
     *,
     silent: bool = False,
+    league_changes_out: list[tuple[str, str, str]] | None = None,
 ) -> tuple[int, list[tuple[int, int]], list[tuple[int, int]]]:
-    """Sync role cho một member cụ thể. Trả về (changed, added_log, removed_log).
+    """Sync role for a single member. Returns (changed, added_log, removed_log).
 
     Args:
-        silent: Nếu True, bỏ qua gửi thông báo league change vào announce channels.
-                Dùng khi gọi từ -decay để tránh spam.
+        silent: If True, skip sending individual league-change notifications to
+                announce channels. Used when called from -decay to avoid spam.
+        league_changes_out: If provided (a list), every time a league change
+                (promote/demote) is detected, a tuple
+                (member_mention, old_league_name, new_league_name) is appended
+                to this list instead, regardless of `silent`. Used to batch all
+                league changes into a single message (e.g. after -decay)
+                instead of sending one message per member.
     """
     role_by_id = {r.id: r for r in guild.roles}
 
@@ -283,18 +298,24 @@ async def _sync_member_role(
                 lambda: member.add_roles(*to_add, reason="League sync by Elo")
             )
 
-        if not silent and announce_channels and to_remove and to_add:
+        if to_remove and to_add:
             old_role = to_remove[0]
             new_role = to_add[0]
             old_name = role_id_to_name.get(old_role.id, old_role.name)
             new_name = role_id_to_name.get(new_role.id, new_role.name)
-            change_word = "promoted" if role_rank.get(new_role.id, 0) > role_rank.get(old_role.id, 0) else "demoted"
-            msg = f"{member.mention} has been {change_word} from **{old_name}** to **{new_name}**."
-            for ch in announce_channels:
-                try:
-                    await ch.send(msg)
-                except Exception:
-                    pass
+
+            if league_changes_out is not None:
+                # Batch the change so the caller can send a single consolidated
+                # message, instead of one message per member.
+                league_changes_out.append((member.mention, old_name, new_name))
+            elif not silent and announce_channels:
+                change_word = "promoted" if role_rank.get(new_role.id, 0) > role_rank.get(old_role.id, 0) else "demoted"
+                msg = f"{member.mention} has been {change_word} from **{old_name}** to **{new_name}**."
+                for ch in announce_channels:
+                    try:
+                        await ch.send(msg)
+                    except Exception:
+                        pass
 
         return 1, added_log, removed_log
     except Exception:
@@ -307,17 +328,24 @@ async def sync_league_roles(
     player_ids: list[int] | None = None,
     *,
     silent: bool = False,
+    league_changes_out: list[tuple[str, str, str]] | None = None,
 ) -> tuple[int, list[str], list[tuple[int, int]], list[tuple[int, int]]]:
     """
-    Assign/remove league roles dựa trên Elo.
+    Assign/remove league roles based on Elo.
 
     Args:
-        guild: Discord guild cần sync.
-        player_ids: Nếu truyền vào, chỉ sync những player đó (vd: sau khi report
-                    match, chỉ cần sync 2 người liên quan thay vì toàn bộ guild).
-                    Nếu None, sync toàn bộ.
-        silent: Nếu True, bỏ qua gửi thông báo league change. Dùng khi gọi từ
-                -decay để tránh spam bot.
+        guild: Discord guild to sync.
+        player_ids: If provided, only sync those players (e.g. after a report
+                    match, only the 2 involved players need syncing instead of
+                    the whole guild). If None, sync everyone.
+        silent: If True, skip sending individual league-change notifications
+                to announce channels. Used when called from -decay to avoid
+                spamming the bot.
+        league_changes_out: If provided (a list), every league change detected
+                during this sync is appended to the list as a tuple
+                (member_mention, old_league_name, new_league_name) instead of
+                sending individual messages to announce channels. The caller
+                can then use this list to build a single consolidated message.
 
     Returns:
         (updated_count, missing_role_names, added_log, removed_log)
@@ -333,7 +361,7 @@ async def sync_league_roles(
     if not effective_leagues:
         return 0, missing_names, [], []
 
-    # Lấy dữ liệu player từ DB – chỉ những player được chỉ định nếu có
+    # Fetch player data from DB -- only the specified players if given
     with db_connection(guild.id) as (conn, cursor):
         if player_ids:
             placeholders = ",".join("?" * len(player_ids))
@@ -345,20 +373,17 @@ async def sync_league_roles(
             cursor.execute("SELECT id, elo, games_won, games_lost FROM players")
         players = cursor.fetchall()
 
-    announce_channels = [
-        ch for ch in (guild.get_channel(cid) for cid in get_league_announce_channel_ids(guild.id))
-        if isinstance(ch, discord.TextChannel)
-    ]
+    announce_channels = get_league_announce_channels(guild)
 
     discovered_role_ids: set[int] = set()
 
-    # Full sync (decay, lapply, ...): tuần tự + delay nhỏ giữa mỗi member
-    # để tránh 429 từ KataProxy khi có nhiều player.
-    # Partial sync (sau report match, 1-2 người): parallel vẫn OK.
+    # Full sync (decay, lapply, ...): sequential + small delay between each
+    # member to avoid 429s from KataProxy when there are many players.
+    # Partial sync (after reporting a match, 1-2 people): parallel is fine.
     is_full_sync = player_ids is None
-    # Delay (giây) giữa mỗi role operation khi full sync.
+    # Delay (seconds) between each role operation during a full sync.
     _FULL_SYNC_DELAY = 0.5
-    # Khi bị 429 sau khi đã retry trong _sync_member_role, chờ thêm trước khi thử lại member
+    # After a 429 (once already retried inside _sync_member_role), wait longer before retrying the member
     _RETRY_BACKOFF = 5.0
     _MAX_MEMBER_RETRIES = 3
 
@@ -376,10 +401,11 @@ async def sync_league_roles(
             effective_leagues, league_role_ids, role_id_to_name, role_rank,
             announce_channels, discovered_role_ids,
             silent=silent,
+            league_changes_out=league_changes_out,
         )
 
     if is_full_sync:
-        # Tuần tự hoàn toàn với retry queue — đảm bảo mọi member đều được xử lý
+        # Fully sequential with a retry queue -- ensures every member gets processed
         all_results: list[tuple[int, list, list]] = []
         pending = list(players)  # [(pid, elo, gw, gl), ...]
 
@@ -390,7 +416,7 @@ async def sync_league_roles(
                     result = await _process_one(pid_raw, elo, gw, gl)
                     all_results.append(result)
                     if result[0]:
-                        # Đổi role thành công → delay nhỏ trước member tiếp theo
+                        # Role change succeeded -> small delay before the next member
                         await asyncio.sleep(_FULL_SYNC_DELAY)
                 except discord.HTTPException as e:
                     if e.status == 429:
@@ -407,13 +433,13 @@ async def sync_league_roles(
             pending = failed
             if not pending:
                 break
-            # Còn member thất bại → chờ dài hơn trước khi retry vòng tiếp
+            # Members still failed -> wait longer before the next retry round
             if attempt < _MAX_MEMBER_RETRIES - 1:
                 await asyncio.sleep(_RETRY_BACKOFF * (attempt + 2))
 
         results = all_results
     else:
-        # Partial sync: parallel với semaphore(5), nhanh hơn cho 1-2 người
+        # Partial sync: parallel with semaphore(5), faster for 1-2 people
         semaphore = asyncio.Semaphore(5)
 
         async def _process_one_guarded(pid_raw, elo, gw, gl):
