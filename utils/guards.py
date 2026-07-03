@@ -1,12 +1,13 @@
 import re
 
 from discord.utils import get
+import discord
 
 # Allowed character ranges:
 #   a-zA-Z0-9_   → ASCII letters, digits, underscore
-#   \u00C0-\u024F → Latin Extended (chữ có dấu: à á â ã ä å æ ç è é ê ...)
+#   \u00C0-\u024F → Latin Extended (accented letters: à á â ã ä å æ ç è é ê ...)
 #   \u0300-\u036F → Combining diacritical marks (NFD decomposed accents)
-#   \u4E00-\u9FFF → CJK Unified Ideographs (chữ Hán/Trung cơ bản)
+#   \u4E00-\u9FFF → CJK Unified Ideographs (basic Chinese/Han characters)
 #   \u3400-\u4DBF → CJK Extension A
 #   \uF900-\uFAFF → CJK Compatibility Ideographs
 #   \u3040-\u309F → Hiragana (Japanese)
@@ -14,8 +15,8 @@ from discord.utils import get
 #   \uAC00-\uD7AF → Hangul Syllables (Korean)
 #   \u1100-\u11FF → Hangul Jamo
 #   \u3130-\u318F → Hangul Compatibility Jamo
-#   \.            → dấu chấm
-# Tất cả script khác (Cyrillic, Greek, Arabic, emoji, ...) đều bị chặn.
+#   \.            → period
+# All other scripts (Cyrillic, Greek, Arabic, emoji, ...) are blocked.
 _VALID_NAME_RE = re.compile(
     r"^["
     r"a-zA-Z0-9_"
@@ -30,6 +31,15 @@ _VALID_NAME_RE = re.compile(
     r"\u1100-\u11FF"
     r"\u3130-\u318F"
     r"\.]+$"
+)
+
+
+# Human-readable description of is_valid_name()'s rules, shared by the
+# registration error messages and the -help / /help text for register/rename.
+NAME_RULE_TEXT = (
+    "Name must be 2-25 characters and only contain English letters, "
+    "accented letters (e.g. à, ü), Chinese/Japanese/Korean characters, "
+    "numbers, '.' and '_'. Names containing \"elobot\" are not allowed."
 )
 
 
@@ -54,3 +64,11 @@ def is_valid_name(name: str) -> tuple[bool, str]:
 def is_admin(ctx) -> bool:
     """Check if the user has the 'Elo Bot Manager' role."""
     return get(ctx.author.roles, name="Elo Bot Manager") is not None
+
+
+def is_admin_interaction(interaction: discord.Interaction) -> bool:
+    """App-command variant of ``is_admin``."""
+    user = interaction.user
+    if not isinstance(user, discord.Member):
+        return False
+    return get(user.roles, name="Elo Bot Manager") is not None

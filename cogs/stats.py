@@ -3,6 +3,7 @@ import typing
 from datetime import datetime, timezone
 
 import discord
+from discord import app_commands
 from discord.ext import commands
 
 from db.elo_db import db_connection, db_exists, get_db_path
@@ -12,6 +13,8 @@ from utils import (
     get_most_played_with,
     get_opponent_games,
 )
+from utils.autocomplete import stats_top_elo_name_autocomplete
+from utils.slash_ctx import SlashContext
 
 STATS_ELO_LEADERBOARD_NOTE = (
     "*Play at least one set to be ranked on the Elo leaderboard.*"
@@ -30,9 +33,9 @@ class StatsRefreshButton(discord.ui.Button):
         await self.custom_view.update_stats(interaction)
 
 
-# Modified: StatsView giờ là LayoutView (Components V2) để nút Refresh nằm
-# NGAY TRONG khung viền màu (accessory của Section), giống thẻ bài OwO,
-# thay vì trôi nổi ở một action row tách biệt bên dưới embed.
+# Modified: StatsView is now a LayoutView (Components V2) so the Refresh
+# button sits INSIDE the colored border (as an accessory of Section), like an
+# OwO card, instead of floating in a separate action row below the embed.
 class StatsView(discord.ui.LayoutView):
     def __init__(self, cog, ctx, user_id: int, had_target: bool):
         super().__init__(timeout=3600.0)
@@ -59,7 +62,9 @@ class StatsView(discord.ui.LayoutView):
         self.add_item(container)
 
         if isinstance(interaction_or_ctx, discord.Interaction):
-            await interaction_or_ctx.response.edit_message(view=self)
+            await interaction_or_ctx.response.edit_message(
+                view=self, allowed_mentions=discord.AllowedMentions.none()
+            )
             if interaction_or_ctx.message:
                 self.message = interaction_or_ctx.message
             else:
@@ -68,13 +73,17 @@ class StatsView(discord.ui.LayoutView):
                 except Exception:
                     pass
         else:
-            self.message = await interaction_or_ctx.send(view=self)
+            self.message = await interaction_or_ctx.send(
+                view=self, allowed_mentions=discord.AllowedMentions.none()
+            )
 
     async def on_timeout(self) -> None:
         self.refresh_button.disabled = True
         if self.message:
             try:
-                await self.message.edit(view=self)
+                await self.message.edit(
+                    view=self, allowed_mentions=discord.AllowedMentions.none()
+                )
             except Exception:
                 pass
 
@@ -169,8 +178,8 @@ class StatsCog(commands.Cog):
             container.add_item(discord.ui.TextDisplay(body))
 
         container.add_item(discord.ui.Separator())
-        # Modified: "Last updated" dùng <t:...:R> (TextDisplay hỗ trợ markdown)
-        # nên Discord tự cập nhật thời gian tương đối, không cần bot edit lại.
+        # Modified: "Last updated" uses <t:...:R> (TextDisplay supports markdown)
+        # so Discord updates the relative time itself, no need for the bot to re-edit.
         container.add_item(
             discord.ui.Section(
                 discord.ui.TextDisplay(
@@ -287,7 +296,27 @@ class StatsCog(commands.Cog):
 
         raise ValueError("Provide either user_id or search_name")
 
-    @commands.command(help="View player stats. Usage: -stats [@member or name]")
+    async def _resolve_user_by_id_or_mention(
+        self, ctx: commands.Context, raw: str
+    ) -> typing.Union[discord.Member, discord.User, None]:
+        """Resolve a raw mention token (``<@id>``) or a bare Discord ID string
+        into a Member/User. Returns None if it can't be resolved."""
+        raw = raw.strip()
+        mention_match = re.fullmatch(r"<@!?(\d+)>", raw)
+        uid_str = mention_match.group(1) if mention_match else raw
+        try:
+            uid = int(uid_str)
+        except ValueError:
+            return None
+        member = ctx.guild.get_member(uid) if ctx.guild else None
+        if member:
+            return member
+        try:
+            return await self.bot.fetch_user(uid)
+        except discord.NotFound:
+            return None
+
+    @commands.command(name="stats", help="View player stats (@mention, name, or Discord ID).")
     async def stats(
         self, ctx: commands.Context, *, target: typing.Optional[str] = None
     ):
@@ -295,35 +324,101 @@ class StatsCog(commands.Cog):
         search_name = None
         had_target = target is not None  # whether caller provided an explicit target
 
-        # resolve target: member, mention, or name search
+        # resolve target: mention, member, or name search
         if target is None:
             user = ctx.author
         else:
-            try:
-                user = await commands.MemberConverter().convert(ctx, target)
-            except commands.BadArgument:
-                mention_match = re.match(r"<@!?(\d+)>", target)
-                if mention_match:
-                    uid = int(mention_match.group(1))
-                    user = ctx.guild.get_member(uid)
-                    if not user:
-                        try:
-                            user = await self.bot.fetch_user(uid)
-                        except discord.NotFound:
-                            await ctx.send(
-                                embed=discord.Embed(
-                                    title="User Not Found",
-                                    description="Could not find the mentioned user.",
-                                    color=discord.Color.red(),
-                                )
+            target = target.strip()
+            # Check for a raw mention token first (e.g. "@Senko" resolved by
+            # Discord's client-side autocomplete to "<@123>"/"<@!123>"). This
+            # must be checked before MemberConverter, since MemberConverter
+            # can raise on interaction-derived Contexts (hybrid/slash
+            # invocations) before it ever gets a chance to match the mention.
+            mention_match = re.fullmatch(r"<@!?(\d+)>", target)
+            if mention_match:
+                uid = int(mention_match.group(1))
+                user = ctx.guild.get_member(uid)
+                if not user:
+                    try:
+                        user = await self.bot.fetch_user(uid)
+                    except discord.NotFound:
+                        await ctx.send(
+                            embed=discord.Embed(
+                                title="User Not Found",
+                                description="Could not find the mentioned user.",
+                                color=discord.Color.red(),
                             )
-                            return
-                else:
+                        )
+                        return
+            else:
+                try:
+                    user = await commands.MemberConverter().convert(ctx, target)
+                except Exception:
                     search_name = target
                     user = None
 
         with db_connection(ctx.guild.id) as (conn, cursor):
             await self._stats_impl(ctx, cursor, user, search_name, target, had_target)
+
+    @app_commands.command(name="stats", description="View player statistics.")
+    @app_commands.describe(
+        name="Player's registered name.",
+        mention="Player to mention.",
+        discord_id="Player's Discord ID.",
+    )
+    @app_commands.autocomplete(
+        name=stats_top_elo_name_autocomplete,
+    )
+    @app_commands.guild_only()
+    async def slash_stats(
+        self,
+        interaction: discord.Interaction,
+        name: typing.Optional[str] = None,
+        mention: typing.Optional[discord.Member] = None,
+        discord_id: typing.Optional[str] = None,
+    ):
+        provided = [v for v in (name, mention, discord_id) if v]
+        if len(provided) > 1:
+            await interaction.response.send_message(
+                embed=discord.Embed(
+                    title="Too Many Inputs",
+                    description="Please provide only one of `name`, `mention`, or `discord_id`.",
+                    color=discord.Color.red(),
+                ),
+                ephemeral=True,
+            )
+            return
+
+        ctx = SlashContext(interaction)
+        user = None
+        search_name = None
+        target_text = None
+        had_target = bool(provided)
+
+        if discord_id:
+            target_text = discord_id
+            user = await self._resolve_user_by_id_or_mention(ctx, discord_id)
+            if user is None:
+                await interaction.response.send_message(
+                    embed=discord.Embed(
+                        title="User Not Found",
+                        description="Could not find a user with that Discord ID.",
+                        color=discord.Color.red(),
+                    ),
+                    ephemeral=True,
+                )
+                return
+        elif mention:
+            target_text = mention.mention
+            user = mention
+        elif name:
+            target_text = name
+            search_name = name
+        else:
+            user = interaction.user
+
+        with db_connection(interaction.guild.id) as (conn, cursor):
+            await self._stats_impl(ctx, cursor, user, search_name, target_text, had_target)
 
     async def _stats_impl(
         self,
@@ -396,7 +491,7 @@ class StatsCog(commands.Cog):
                 await ctx.send(
                     embed=discord.Embed(
                         title="Player Not Registered",
-                        description=f"{mention_text} is not registered. Use `-register <n>` to sign up!",
+                        description=f"{mention_text} is not registered. Use `-register <name>` to sign up!",
                         color=discord.Color.red(),
                     )
                 )

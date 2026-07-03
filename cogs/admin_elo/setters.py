@@ -5,27 +5,35 @@ from __future__ import annotations
 import asyncio
 
 import discord
+from discord import app_commands
 from discord.ext import commands
 
 from config import YES_EMOJI, NO_EMOJI
 from db.elo_db import db_connection
-from utils import is_admin, sync_league_roles
+from utils import is_admin, is_admin_interaction, sync_league_roles
 from utils.lb_cache import (
     invalidate as lb_cache_invalidate,
     schedule_rebuild as lb_cache_rebuild,
 )
+from utils.slash_ctx import SlashContext
 
 from .base import AdminEloBaseCog
 
 
 class AdminEloSettersCog(AdminEloBaseCog):
-    """Commands: set_e, set_eid, set_w, set_wid, set_l, set_lid, set_gid, set_stats."""
+    """Commands: set_e, set_eid, set_w, set_wid, set_l, set_lid, set_gid, set_g, set_stats."""
 
     # ------------------------------------------------------------------
     # Elo setters
     # ------------------------------------------------------------------
 
-    @commands.command(help="Set the Elo of a specific player (admin only).")
+    @commands.hybrid_command(
+        description="Set the Elo of a specific player (admin only).",
+        help="Set the Elo of a specific player (admin only).",
+        with_app_command=True,
+    )
+    @app_commands.describe(member="Player to update", elo="New Elo value")
+    @app_commands.guild_only()
     @commands.check(is_admin)
     async def set_e(self, ctx: commands.Context, member: discord.Member, elo: int) -> None:
         with db_connection(ctx.guild.id) as (conn, cursor):
@@ -98,8 +106,12 @@ class AdminEloSettersCog(AdminEloBaseCog):
                 )
             )
 
+    # Modified: set_eid is now a prefix-only command (no with_app_command),
+    # so it no longer registers as a /set_eid slash command. -set_eid still
+    # works as before.
     @commands.command(
-        help="Set the Elo of a specific player using their Discord ID (admin only)."
+        name="set_eid",
+        help="Set the Elo of a specific player using their Discord ID (admin only).",
     )
     @commands.check(is_admin)
     async def set_eid(self, ctx: commands.Context, discord_id: str, elo: int) -> None:
@@ -177,7 +189,13 @@ class AdminEloSettersCog(AdminEloBaseCog):
     # Win/loss setters
     # ------------------------------------------------------------------
 
-    @commands.command(help="Set the win count of a specific player (admin only).")
+    @commands.hybrid_command(
+        description="Set the win count of a specific player (admin only).",
+        help="Set the win count of a specific player (admin only).",
+        with_app_command=True,
+    )
+    @app_commands.describe(member="Player to update", wins="New win count")
+    @app_commands.guild_only()
     @commands.check(is_admin)
     async def set_w(self, ctx: commands.Context, member: discord.Member, wins: int) -> None:
         with db_connection(ctx.guild.id) as (conn, cursor):
@@ -250,7 +268,13 @@ class AdminEloSettersCog(AdminEloBaseCog):
         await self._remove_bot_reactions(message)
         await message.edit(embed=embed)
 
-    @commands.command(help="Set the loss count of a specific player (admin only).")
+    @commands.hybrid_command(
+        description="Set the loss count of a specific player (admin only).",
+        help="Set the loss count of a specific player (admin only).",
+        with_app_command=True,
+    )
+    @app_commands.describe(member="Player to update", losses="New loss count")
+    @app_commands.guild_only()
     @commands.check(is_admin)
     async def set_l(self, ctx: commands.Context, member: discord.Member, losses: int) -> None:
         with db_connection(ctx.guild.id) as (conn, cursor):
@@ -481,10 +505,43 @@ class AdminEloSettersCog(AdminEloBaseCog):
     # ------------------------------------------------------------------
 
     @commands.command(
-        help="Set the monthly game count for a player using their Discord ID (admin only)."
+        help="Set the monthly game count for a player using their Discord ID (admin only).",
     )
     @commands.check(is_admin)
     async def set_gid(
+        self, ctx: commands.Context, discord_id: int, games_played: int
+    ) -> None:
+        await self._set_gid_core(ctx, discord_id, games_played)
+
+    @app_commands.command(
+        name="set_g",
+        description="Set the monthly game count for a player using their Discord ID (admin only).",
+    )
+    @app_commands.describe(discord_id="Discord user ID", games_played="New monthly games played value")
+    @app_commands.guild_only()
+    @app_commands.check(is_admin_interaction)
+    async def slash_set_g(
+        self,
+        interaction: discord.Interaction,
+        discord_id: str,
+        games_played: int,
+    ) -> None:
+        try:
+            user_id_int = int(discord_id)
+        except ValueError:
+            await interaction.response.send_message(
+                embed=discord.Embed(
+                    title="Invalid ID",
+                    description="Please provide a valid Discord user ID.",
+                    color=discord.Color.red(),
+                ),
+                ephemeral=True,
+            )
+            return
+        ctx = SlashContext(interaction)
+        await self._set_gid_core(ctx, user_id_int, games_played)
+
+    async def _set_gid_core(
         self, ctx: commands.Context, discord_id: int, games_played: int
     ) -> None:
         user_id = str(discord_id)
@@ -579,12 +636,22 @@ class AdminEloSettersCog(AdminEloBaseCog):
                 )
             )
 
-    @commands.command(
+    @commands.hybrid_command(
+        description="Set all stats (Elo, wins, losses, monthly games) for a player by Discord ID (admin only).",
         help=(
             "Set all stats (Elo, wins, losses, monthly games) for a player using their "
             "Discord ID (admin only)."
-        )
+        ),
+        with_app_command=True,
     )
+    @app_commands.describe(
+        discord_id="Discord user ID",
+        elo="New Elo value",
+        games_won="New win count",
+        games_lost="New loss count",
+        games_played="New monthly games played value",
+    )
+    @app_commands.guild_only()
     @commands.check(is_admin)
     async def set_stats(
         self,

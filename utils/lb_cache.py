@@ -1,21 +1,21 @@
 """
 Leaderboard image pre-render cache.
 
-Cách hoạt động
---------------
-- Cache lưu ảnh PNG (bytes) cho từng (guild_id, category, page).
-- Khi Elo thay đổi (report confirm, admin edit, revert…), gọi
-  ``invalidate(guild_id)`` để xóa cache của guild đó.
-- Background task ``rebuild(bot, guild_id)`` sẽ render lại tất cả
-  các page của tất cả categories và lưu vào cache.
-- Khi user gọi /lb, ``get()`` trả về bytes từ cache ngay lập tức
-  nếu có; nếu không có (lần đầu hoặc đang rebuild) trả về None và
-  caller tự render bình thường.
+How it works
+------------
+- The cache stores PNG images (bytes) for each (guild_id, category, page).
+- When Elo changes (report confirm, admin edit, revert...), call
+  ``invalidate(guild_id)`` to clear that guild's cache.
+- The background task ``rebuild(bot, guild_id)`` re-renders all pages of
+  all categories and stores them in the cache.
+- When a user calls /lb, ``get()`` returns the bytes from the cache
+  immediately if present; if not (first time or still rebuilding) it
+  returns None and the caller renders it normally.
 
 Thread-safety
 -------------
-asyncio event loop là single-threaded nên dict thao tác bình thường.
-render chạy trong thread pool (asyncio.to_thread) nên không block loop.
+The asyncio event loop is single-threaded so dict operations are safe as-is.
+Rendering runs in a thread pool (asyncio.to_thread) so it doesn't block the loop.
 """
 
 from __future__ import annotations
@@ -33,7 +33,7 @@ logger = logging.getLogger(__name__)
 # (guild_id, category, page) → PNG bytes
 _cache: dict[tuple[int, str, int], bytes] = {}
 
-# Giữ track task đang rebuild để tránh chạy 2 lần cùng lúc cho 1 guild
+# Track in-progress rebuild tasks to avoid running two at once for the same guild
 _rebuild_tasks: dict[int, asyncio.Task] = {}
 
 CATEGORIES = ("elo", "wins", "losses", "win_rate", "games_played_this_month")
@@ -45,7 +45,7 @@ PER_PAGE = 10
 # ---------------------------------------------------------------------------
 
 def get(guild_id: int, category: str, page: int) -> bytes | None:
-    """Trả về PNG bytes từ cache, hoặc None nếu chưa có."""
+    """Return PNG bytes from the cache, or None if not present."""
     result = _cache.get((guild_id, category, page))
     if result is not None:
         logger.debug(
@@ -61,7 +61,7 @@ def get(guild_id: int, category: str, page: int) -> bytes | None:
 
 
 def put(guild_id: int, category: str, page: int, png_bytes: bytes) -> None:
-    """Lưu PNG bytes vào cache."""
+    """Store PNG bytes in the cache."""
     _cache[(guild_id, category, page)] = png_bytes
     logger.debug(
         "LB cache STORE guild=%s category=%s page=%d  (%d bytes)",
@@ -70,7 +70,7 @@ def put(guild_id: int, category: str, page: int, png_bytes: bytes) -> None:
 
 
 def invalidate(guild_id: int) -> None:
-    """Xóa toàn bộ cache của một guild (gọi sau mỗi lần Elo thay đổi)."""
+    """Clear the entire cache for a guild (call this after every Elo change)."""
     keys = [k for k in _cache if k[0] == guild_id]
     for k in keys:
         del _cache[k]
@@ -78,7 +78,7 @@ def invalidate(guild_id: int) -> None:
 
 
 def invalidate_all() -> None:
-    """Xóa toàn bộ cache (dùng khi bot restart hoặc mass reset)."""
+    """Clear the entire cache (used on bot restart or mass reset)."""
     _cache.clear()
     logger.debug("LB cache fully cleared")
 
@@ -89,10 +89,10 @@ def invalidate_all() -> None:
 
 def schedule_rebuild(bot: "discord.ext.commands.Bot", guild_id: int) -> None:
     """
-    Lên lịch rebuild cache cho guild sau khi Elo thay đổi.
+    Schedule a cache rebuild for the guild after an Elo change.
 
-    Hủy task rebuild cũ nếu đang chạy (tránh race condition khi nhiều
-    match được report liên tiếp).
+    Cancels the previous rebuild task if it's still running (avoids a race
+    condition when several matches are reported back-to-back).
     """
     old = _rebuild_tasks.get(guild_id)
     if old and not old.done():
@@ -104,14 +104,14 @@ def schedule_rebuild(bot: "discord.ext.commands.Bot", guild_id: int) -> None:
 
 
 async def _rebuild_guild(bot: "discord.ext.commands.Bot", guild_id: int) -> None:
-    """Render lại tất cả các page của mọi category cho guild."""
+    """Re-render all pages of every category for the guild."""
     try:
         from db.elo_db import db_connection
         from utils.rendering import render_leaderboard_image
         from utils.lb_cache import put
         from utils import calculate_win_rate
 
-        await asyncio.sleep(0)  # yield trước khi bắt đầu render
+        await asyncio.sleep(0)  # yield before starting to render
 
         for category in CATEGORIES:
             try:
@@ -155,7 +155,7 @@ async def _rebuild_guild(bot: "discord.ext.commands.Bot", guild_id: int) -> None
 
 
 def _fetch_entries(guild_id: int, category: str) -> list[tuple[str, str]]:
-    """Trả về list (name, stat_str) đã sort cho category, không phân trang."""
+    """Return a sorted list of (name, stat_str) for the category, unpaginated."""
     from db.elo_db import db_connection
     from utils import calculate_win_rate
 

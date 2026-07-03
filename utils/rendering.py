@@ -80,7 +80,7 @@ def _cjk_font_paths(*, bold: bool) -> list[str]:
     paths: list[str] = []
     assets = _assets_dir()
 
-    # Ưu tiên file đã tải về / có sẵn trong assets/
+    # Prefer an already-downloaded file / one available in assets/
     if _cjk_font_asset_path:
         paths.append(_cjk_font_asset_path)
 
@@ -179,8 +179,8 @@ def _open_truetype(path: str, size: int, *, bold: bool) -> ImageFont.FreeTypeFon
 
 
 # ---------------------------------------------------------------------------
-# Font caching – lru_cache giữ font objects trong memory, tránh đọc disk
-# mỗi lần render.  maxsize=128 đủ cho tất cả size/bold combos thực tế.
+# Font caching - lru_cache keeps font objects in memory, avoiding disk reads
+# on every render.  maxsize=128 is enough for all realistic size/bold combos.
 # ---------------------------------------------------------------------------
 
 @functools.lru_cache(maxsize=128)
@@ -369,5 +369,311 @@ async def render_leaderboard_image_async(
         title=title,
         page=page,
         total_pages=total_pages,
+        width=width,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Match history image (ClashPerk "war log" style table)
+# ---------------------------------------------------------------------------
+
+_HIST_WIN = (87, 242, 135)     # green accent / positive delta
+_HIST_LOSS = (237, 66, 69)     # red accent / negative delta
+_HIST_SEPARATOR = (65, 68, 74)
+
+# (date, opponent, wins, losses, delta, elo_init, elo_final)
+HistoryRowTuple = tuple[str, str, int, int, int, int, int]
+
+
+def render_history_image(
+    rows: list[HistoryRowTuple],
+    *,
+    title: str,
+    summary: str | None = None,
+    width: int = 620,
+) -> io.BytesIO:
+    """
+    Render match history rows as a PNG "log" table, ClashPerk-style:
+    a colored win/loss accent bar per row + a DATE/OPPONENT/W/L/+-/INIT/FINAL
+    grid, instead of a plain text table or a wall of embed fields.
+    """
+    row_height = 42 * SCALE
+    pad_x = 20 * SCALE
+    title_h = 34 * SCALE
+    summary_h = 26 * SCALE if summary else 0
+    col_header_h = 30 * SCALE
+    pad_bottom = 14 * SCALE
+    accent_w = 4 * SCALE
+    accent_gap = 10 * SCALE
+    width_px = width * SCALE
+
+    # Column widths (must sum to width_px - 2*pad_x - accent_w - accent_gap)
+    date_w = 70 * SCALE
+    wins_w = 55 * SCALE
+    losses_w = 55 * SCALE
+    delta_w = 75 * SCALE
+    init_w = 80 * SCALE
+    final_w = 80 * SCALE
+    fixed_w = date_w + wins_w + losses_w + delta_w + init_w + final_w
+    opponent_w = width_px - pad_x * 2 - accent_w - accent_gap - fixed_w
+
+    top_h = title_h + summary_h + col_header_h
+    height_px = top_h + len(rows) * row_height + pad_bottom
+
+    img = _get_lb_template(width_px, height_px).copy()
+    draw = ImageDraw.Draw(img)
+
+    title_font = _load_lb_font(22 * SCALE, bold=True, for_text=title)
+    summary_font = _load_latin_font(15 * SCALE)
+    header_font = _load_latin_font(15 * SCALE, bold=True)
+    cell_font = _load_latin_font(17 * SCALE)
+    cell_font_bold = _load_latin_font(17 * SCALE, bold=True)
+
+    content_x0 = pad_x + accent_w + accent_gap
+
+    # ── title / summary ────────────────────────────────────────────────
+    draw.text((pad_x, 8 * SCALE), title, fill=_LB_TEXT, font=title_font)
+    if summary:
+        draw.text(
+            (pad_x, title_h + 4 * SCALE),
+            summary,
+            fill=_LB_TEXT_MUTED,
+            font=summary_font,
+        )
+
+    # ── column headers ─────────────────────────────────────────────────
+    col_x = {
+        "date": content_x0,
+        "opponent": content_x0 + date_w,
+    }
+    col_x["wins"] = col_x["opponent"] + opponent_w
+    col_x["losses"] = col_x["wins"] + wins_w
+    col_x["delta"] = col_x["losses"] + losses_w
+    col_x["init"] = col_x["delta"] + delta_w
+    col_x["final"] = col_x["init"] + init_w
+
+    header_y = title_h + summary_h + 4 * SCALE
+    draw.text((col_x["date"], header_y), "DATE", fill=_LB_TEXT_MUTED, font=header_font)
+    draw.text((col_x["opponent"], header_y), "OPPONENT", fill=_LB_TEXT_MUTED, font=header_font)
+    draw.text((col_x["wins"], header_y), "W", fill=_LB_TEXT_MUTED, font=header_font)
+    draw.text((col_x["losses"], header_y), "L", fill=_LB_TEXT_MUTED, font=header_font)
+    draw.text((col_x["delta"], header_y), "+/-", fill=_LB_TEXT_MUTED, font=header_font)
+    draw.text((col_x["init"], header_y), "INIT", fill=_LB_TEXT_MUTED, font=header_font)
+    draw.text((col_x["final"], header_y), "FINAL", fill=_LB_TEXT_MUTED, font=header_font)
+
+    sep_y = top_h - 4 * SCALE
+    draw.line(
+        (pad_x, sep_y, width_px - pad_x, sep_y),
+        fill=_HIST_SEPARATOR,
+        width=max(1, SCALE // 2),
+    )
+
+    # ── rows ────────────────────────────────────────────────────────────
+    for idx, (date_str, opponent, wins, losses, delta, elo_init, elo_final) in enumerate(rows):
+        won = wins > losses
+        accent_color = _HIST_WIN if won else _HIST_LOSS
+        y0 = top_h + idx * row_height
+        y1 = y0 + row_height - 6 * SCALE
+        text_y = y0 + 9 * SCALE
+
+        draw.rounded_rectangle(
+            (pad_x, y0, pad_x + accent_w, y1),
+            radius=2 * SCALE,
+            fill=accent_color,
+        )
+
+        draw.text((col_x["date"], text_y), date_str, fill=_LB_TEXT, font=cell_font)
+
+        display_opponent = _lb_truncate_text(
+            draw, opponent, cell_font, opponent_w - 8 * SCALE
+        )
+        draw.text((col_x["opponent"], text_y), display_opponent, fill=_LB_TEXT, font=cell_font)
+
+        draw.text((col_x["wins"], text_y), str(wins), fill=_HIST_WIN, font=cell_font_bold)
+        draw.text((col_x["losses"], text_y), str(losses), fill=_HIST_LOSS, font=cell_font_bold)
+
+        delta_text = f"+{delta}" if delta >= 0 else str(delta)
+        delta_color = _HIST_WIN if delta >= 0 else _HIST_LOSS
+        draw.text((col_x["delta"], text_y), delta_text, fill=delta_color, font=cell_font_bold)
+
+        draw.text((col_x["init"], text_y), str(elo_init), fill=_LB_TEXT_MUTED, font=cell_font)
+        draw.text((col_x["final"], text_y), str(elo_final), fill=_LB_TEXT, font=cell_font_bold)
+
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    buf.seek(0)
+    return buf
+
+
+async def render_history_image_async(
+    rows: list[HistoryRowTuple],
+    *,
+    title: str,
+    summary: str | None = None,
+    width: int = 620,
+) -> io.BytesIO:
+    """Async wrapper around render_history_image (see render_leaderboard_image_async)."""
+    return await asyncio.to_thread(
+        render_history_image,
+        rows,
+        title=title,
+        summary=summary,
+        width=width,
+    )
+
+# ---------------------------------------------------------------------------
+# Player comparison image (two-column "scoreboard" table)
+# ---------------------------------------------------------------------------
+
+_CMP_WIN = (87, 242, 135)      # winning value accent (matches history win color)
+_CMP_LOSE = (237, 66, 69)      # losing value accent (matches history loss color)
+_CMP_GOLD = (255, 215, 0)      # winner-declaration line
+
+# (label, value1_str, value2_str, winner) where winner is 0=tie, 1=player1, 2=player2
+CompareRowTuple = tuple[str, str, str, int]
+
+
+def render_compare_image(
+    rows: list[CompareRowTuple],
+    *,
+    name1: str,
+    name2: str,
+    winner_text: str,
+    width: int = 560,
+) -> io.BytesIO:
+    """
+    Render a two-player comparison as a PNG "scoreboard" table: player
+    names as column headers, one row per stat with the higher value
+    highlighted, and a winner-declaration line at the bottom.
+    """
+    row_height = 42 * SCALE
+    pad_x = 20 * SCALE
+    title_h = 34 * SCALE
+    header_h = 30 * SCALE
+    winner_h = 40 * SCALE
+    pad_bottom = 14 * SCALE
+    width_px = width * SCALE
+
+    label_w = 190 * SCALE
+    value_col_w = (width_px - pad_x * 2 - label_w) // 2
+
+    top_h = title_h + header_h
+    height_px = top_h + len(rows) * row_height + winner_h + pad_bottom
+
+    img = _get_lb_template(width_px, height_px).copy()
+    draw = ImageDraw.Draw(img)
+
+    title_font = _load_lb_font(22 * SCALE, bold=True, for_text=f"{name1} vs {name2}")
+    header_font = _load_lb_font(18 * SCALE, bold=True, for_text=f"{name1}{name2}")
+    label_font = _load_latin_font(17 * SCALE)
+    value_font = _load_latin_font(19 * SCALE)
+    value_font_bold = _load_latin_font(19 * SCALE, bold=True)
+    winner_font = _load_lb_font(18 * SCALE, bold=True, for_text=winner_text)
+
+    value1_x = pad_x + label_w
+    value2_x = value1_x + value_col_w
+
+    # ── title ("Player1 vs Player2") ─────────────────────────────────────
+    title_text = f"{name1}  vs  {name2}"
+    title_max_w = width_px - pad_x * 2
+    display_title = _lb_truncate_text(draw, title_text, title_font, title_max_w)
+    title_w = _lb_text_width(draw, display_title, title_font)
+    draw.text(
+        ((width_px - title_w) // 2, 8 * SCALE),
+        display_title,
+        fill=_LB_TEXT,
+        font=title_font,
+    )
+
+    # ── column headers ─────────────────────────────────────────────────
+    header_y = title_h + 4 * SCALE
+    name1_disp = _lb_truncate_text(draw, name1, header_font, value_col_w - 8 * SCALE)
+    name2_disp = _lb_truncate_text(draw, name2, header_font, value_col_w - 8 * SCALE)
+    name1_w = _lb_text_width(draw, name1_disp, header_font)
+    name2_w = _lb_text_width(draw, name2_disp, header_font)
+    draw.text(
+        (value1_x + (value_col_w - name1_w) // 2, header_y),
+        name1_disp,
+        fill=_LB_TEXT_MUTED,
+        font=header_font,
+    )
+    draw.text(
+        (value2_x + (value_col_w - name2_w) // 2, header_y),
+        name2_disp,
+        fill=_LB_TEXT_MUTED,
+        font=header_font,
+    )
+
+    sep_y = top_h - 4 * SCALE
+    draw.line(
+        (pad_x, sep_y, width_px - pad_x, sep_y),
+        fill=_HIST_SEPARATOR,
+        width=max(1, SCALE // 2),
+    )
+
+    # ── stat rows ───────────────────────────────────────────────────────
+    for idx, (label, val1, val2, winner) in enumerate(rows):
+        y0 = top_h + idx * row_height
+        text_y = y0 + 10 * SCALE
+
+        draw.text((pad_x, text_y), label, fill=_LB_TEXT_MUTED, font=label_font)
+
+        color1 = _CMP_WIN if winner == 1 else (_LB_TEXT if winner == 0 else _LB_TEXT_MUTED)
+        color2 = _CMP_WIN if winner == 2 else (_LB_TEXT if winner == 0 else _LB_TEXT_MUTED)
+        font1 = value_font_bold if winner in (0, 1) else value_font
+        font2 = value_font_bold if winner in (0, 2) else value_font
+
+        val1_w = _lb_text_width(draw, val1, font1)
+        val2_w = _lb_text_width(draw, val2, font2)
+        draw.text(
+            (value1_x + (value_col_w - val1_w) // 2, text_y),
+            val1,
+            fill=color1,
+            font=font1,
+        )
+        draw.text(
+            (value2_x + (value_col_w - val2_w) // 2, text_y),
+            val2,
+            fill=color2,
+            font=font2,
+        )
+
+    # ── winner-declaration footer line ─────────────────────────────────
+    winner_y = top_h + len(rows) * row_height + 10 * SCALE
+    draw.line(
+        (pad_x, winner_y - 6 * SCALE, width_px - pad_x, winner_y - 6 * SCALE),
+        fill=_HIST_SEPARATOR,
+        width=max(1, SCALE // 2),
+    )
+    display_winner = _lb_truncate_text(draw, winner_text, winner_font, title_max_w)
+    winner_w = _lb_text_width(draw, display_winner, winner_font)
+    draw.text(
+        ((width_px - winner_w) // 2, winner_y),
+        display_winner,
+        fill=_CMP_GOLD,
+        font=winner_font,
+    )
+
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    buf.seek(0)
+    return buf
+
+
+async def render_compare_image_async(
+    rows: list[CompareRowTuple],
+    *,
+    name1: str,
+    name2: str,
+    winner_text: str,
+    width: int = 560,
+) -> io.BytesIO:
+    """Async wrapper around render_compare_image (see render_leaderboard_image_async)."""
+    return await asyncio.to_thread(
+        render_compare_image,
+        rows,
+        name1=name1,
+        name2=name2,
+        winner_text=winner_text,
         width=width,
     )

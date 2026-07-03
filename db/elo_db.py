@@ -8,8 +8,8 @@ DB_FOLDER = "databases"
 
 
 # ---------------------------------------------------------------------------
-# Migration tracking: chạy ALTER TABLE mỗi lần get_database_connection() là
-# lãng phí. Dùng set để chỉ migrate mỗi db path một lần trong lifetime process.
+# Migration tracking: running ALTER TABLE on every get_database_connection()
+# call is wasteful. Use a set to migrate each db path only once per process lifetime.
 # ---------------------------------------------------------------------------
 _migrated_dbs: set[str] = set()
 
@@ -70,10 +70,10 @@ def db_exists(guild_id: int | str) -> bool:
 @contextmanager
 def db_connection(guild_id: int):
     """
-    Context manager trả về (conn, cursor) cho guild.
-    Tự động close khi thoát khỏi block, kể cả khi có exception.
+    Context manager that returns (conn, cursor) for a guild.
+    Automatically closes when leaving the block, even on exception.
 
-    Dùng:
+    Usage:
         with db_connection(guild_id) as (conn, cursor):
             cursor.execute(...)
             conn.commit()
@@ -87,11 +87,11 @@ def db_connection(guild_id: int):
 
 def get_database_connection(guild_id: int):
     """
-    Tạo (nếu chưa có) và trả về (conn, cursor) cho guild.
+    Create (if not already present) and return (conn, cursor) for a guild.
 
-    Gọi thủ công khi cần giữ connection qua nhiều bước (vd: long-running
-    transaction). Trong các trường hợp thông thường, dùng db_connection()
-    context manager để tránh connection leak.
+    Call this manually when you need to keep a connection open across
+    multiple steps (e.g. a long-running transaction). In normal cases, use
+    the db_connection() context manager instead to avoid connection leaks.
     """
     if not os.path.exists(DB_FOLDER):
         os.makedirs(DB_FOLDER)
@@ -100,12 +100,12 @@ def get_database_connection(guild_id: int):
     os.makedirs(os.path.dirname(db_path) or DB_FOLDER, exist_ok=True)
 
     conn = sqlite3.connect(db_path)
-    # WAL mode: cho phép đọc đồng thời với ghi, giảm contention
+    # WAL mode: allows concurrent reads while writing, reduces contention
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA foreign_keys=ON")
     cursor = conn.cursor()
 
-    # Chỉ chạy migration một lần mỗi db path trong suốt lifetime của process
+    # Only run migrations once per db path for the lifetime of the process
     if db_path not in _migrated_dbs:
         _run_migrations(conn, cursor)
         _migrated_dbs.add(db_path)
@@ -114,7 +114,7 @@ def get_database_connection(guild_id: int):
 
 
 def _run_migrations(conn: sqlite3.Connection, cursor: sqlite3.Cursor) -> None:
-    """Tạo bảng và migrate schema. Chỉ được gọi một lần mỗi db."""
+    """Create tables and migrate the schema. Only called once per db."""
 
     cursor.execute(
         """
@@ -125,6 +125,7 @@ def _run_migrations(conn: sqlite3.Connection, cursor: sqlite3.Cursor) -> None:
             games_won INTEGER DEFAULT 0,
             games_lost INTEGER DEFAULT 0,
             games_played_this_month INTEGER DEFAULT 0,
+            matches INTEGER DEFAULT 0,
             last_rename INTEGER DEFAULT 0,
             against TEXT DEFAULT ''
         )
@@ -136,7 +137,6 @@ def _run_migrations(conn: sqlite3.Connection, cursor: sqlite3.Cursor) -> None:
         CREATE TABLE IF NOT EXISTS settings (
             guild_id INTEGER PRIMARY KEY,
             language TEXT DEFAULT 'en',
-            seasonal_report_enabled INTEGER DEFAULT 0,
             dev_mode INTEGER DEFAULT 0,
             league_announce_channel_id INTEGER DEFAULT NULL,
             league_announce_channel_ids TEXT DEFAULT NULL
@@ -145,8 +145,10 @@ def _run_migrations(conn: sqlite3.Connection, cursor: sqlite3.Cursor) -> None:
     )
 
     from .h2h_db import create_h2h_table
+    from .match_history_db import create_match_history_table
 
     create_h2h_table(cursor)
+    create_match_history_table(cursor)
 
     cursor.execute(
         """
@@ -162,12 +164,12 @@ def _run_migrations(conn: sqlite3.Connection, cursor: sqlite3.Cursor) -> None:
         """
     )
 
-    # Backward-compatible migrations dùng IGNORE thay vì try/except lặp lại
+    # Backward-compatible migrations use IGNORE instead of repeated try/except
     _safe_alter(cursor, "ALTER TABLE players ADD COLUMN against TEXT DEFAULT ''")
+    _safe_alter(cursor, "ALTER TABLE players ADD COLUMN matches INTEGER DEFAULT 0")
     _safe_alter(cursor, "ALTER TABLE leagues ADD COLUMN min_kind TEXT DEFAULT 'n'")
     _safe_alter(cursor, "ALTER TABLE leagues ADD COLUMN max_kind TEXT DEFAULT 'n'")
     _safe_alter(cursor, "ALTER TABLE leagues ADD COLUMN discovered INTEGER DEFAULT 0")
-    _safe_alter(cursor, "ALTER TABLE settings ADD COLUMN seasonal_report_enabled INTEGER DEFAULT 0")
     _safe_alter(cursor, "ALTER TABLE settings ADD COLUMN dev_mode INTEGER DEFAULT 0")
     _safe_alter(cursor, "ALTER TABLE settings ADD COLUMN league_announce_channel_id INTEGER DEFAULT NULL")
     _safe_alter(cursor, "ALTER TABLE settings ADD COLUMN league_announce_channel_ids TEXT DEFAULT NULL")
@@ -177,7 +179,7 @@ def _run_migrations(conn: sqlite3.Connection, cursor: sqlite3.Cursor) -> None:
 
 
 def _safe_alter(cursor: sqlite3.Cursor, sql: str) -> None:
-    """Thực thi ALTER TABLE, bỏ qua nếu column đã tồn tại."""
+    """Run ALTER TABLE, ignoring the error if the column already exists."""
     try:
         cursor.execute(sql)
     except sqlite3.OperationalError:
@@ -185,7 +187,7 @@ def _safe_alter(cursor: sqlite3.Cursor, sql: str) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Settings helpers – đều dùng db_connection() để không leak
+# Settings helpers - all use db_connection() to avoid leaks
 # ---------------------------------------------------------------------------
 
 def get_language(guild_id: int) -> str:
@@ -193,29 +195,6 @@ def get_language(guild_id: int) -> str:
         cursor.execute("SELECT language FROM settings WHERE guild_id=?", (guild_id,))
         result = cursor.fetchone()
         return result[0] if result else "en"
-
-
-def get_seasonal_report_enabled(guild_id: int) -> bool:
-    with db_connection(guild_id) as (conn, cursor):
-        cursor.execute(
-            "SELECT seasonal_report_enabled FROM settings WHERE guild_id=?",
-            (guild_id,),
-        )
-        row = cursor.fetchone()
-        return bool(row and row[0])
-
-
-def set_seasonal_report_enabled(guild_id: int, enabled: bool) -> None:
-    with db_connection(guild_id) as (conn, cursor):
-        cursor.execute(
-            """
-            INSERT INTO settings (guild_id, language, seasonal_report_enabled)
-            VALUES (?, COALESCE((SELECT language FROM settings WHERE guild_id=?), 'en'), ?)
-            ON CONFLICT(guild_id) DO UPDATE SET seasonal_report_enabled = excluded.seasonal_report_enabled
-            """,
-            (guild_id, guild_id, 1 if enabled else 0),
-        )
-        conn.commit()
 
 
 def get_dev_mode(guild_id: int) -> bool:
@@ -229,16 +208,15 @@ def set_dev_mode(guild_id: int, enabled: bool) -> None:
     with db_connection(guild_id) as (conn, cursor):
         cursor.execute(
             """
-            INSERT INTO settings (guild_id, language, seasonal_report_enabled, dev_mode)
+            INSERT INTO settings (guild_id, language, dev_mode)
             VALUES (
                 ?,
                 COALESCE((SELECT language FROM settings WHERE guild_id=?), 'en'),
-                COALESCE((SELECT seasonal_report_enabled FROM settings WHERE guild_id=?), 0),
                 ?
             )
             ON CONFLICT(guild_id) DO UPDATE SET dev_mode = excluded.dev_mode
             """,
-            (guild_id, guild_id, guild_id, 1 if enabled else 0),
+            (guild_id, guild_id, 1 if enabled else 0),
         )
         conn.commit()
 

@@ -1,239 +1,275 @@
+from datetime import datetime, timezone
+
 import discord
+from discord import app_commands
 from discord.ext import commands
 
-from db import get_seasonal_report_enabled
+from utils.autocomplete import command_name_autocomplete
+from utils.command_registry import (
+    CommandHelp,
+    lookup_command_help,
+    public_command_names,
+)
+from utils.logger import PRIVATE_GUILD_ID
+
+
+async def help_command_autocomplete(
+    interaction: discord.Interaction, current: str
+) -> list[app_commands.Choice[str]]:
+    names = public_command_names()
+    return await command_name_autocomplete(interaction, current, names=names)
+
+
+def _general_commands_list(guild_id: int) -> list[tuple[str, str]]:
+    commands_list = [
+        ("-info / /info", "Show information about the bot."),
+        ("-register <name> / /register", "Register with a custom name and initial 500 Elo."),
+        ("-rename <new_name> / /rename", "Change your name (7-day cooldown)."),
+        (
+            "-report / -rp / /report",
+            "Report a match result.",
+        ),
+        (
+            "-history <count> / /history",
+            "Show recent match history (Date | Opponent | Wins | Loses | +/- | INIT | FINAL).",
+        ),
+    ]
+    commands_list.extend(
+        [
+            (
+                "-leaderboard / lb / /leaderboard",
+                "Show the leaderboard of players based on various stats.",
+            ),
+            ("-lbs / /lbs", "Show the leaderboards for each season."),
+            (
+                "-stats / /stats [player]",
+                "Show your stats / Show another player's stats.",
+            ),
+            (
+                "-compare / -cp / /compare",
+                "Compare two players.",
+            ),
+            (
+                "-leagues / /leagues [name]",
+                "Show discovered leagues, Elo ranges, and player counts.",
+            ),
+            (
+                "-help [command] / /help [command]",
+                "Show this list or detailed help for one command.",
+            ),
+            ("-adhelp / /adhelp", "Show the admin help message."),
+        ]
+    )
+    if guild_id == PRIVATE_GUILD_ID:
+        commands_list.extend(
+            [
+                ("-lb_id <server_id>", "View another server's leaderboard."),
+                ("-gld <server_id>", "Export another server's full leaderboard."),
+                ("-st <server_id> <player_id>", "View a player's stats in another server."),
+                ("-log [<channel> | off]", "Set or clear the bot log channel."),
+                ("-hpbd <@user> <server_id>", "Send a birthday message in another server."),
+            ]
+        )
+    return commands_list
+
+
+def build_overview_embed(guild_id: int, *, title_suffix: str = "") -> discord.Embed:
+    title = "📜 Help - General Commands"
+    if guild_id == PRIVATE_GUILD_ID:
+        title += " (+ Private Commands)"
+    if title_suffix:
+        title += title_suffix
+    embed = discord.Embed(
+        title=title,
+        description=(
+            "Available commands (prefix `-` or slash `/`):\n"
+            "Use `-help <command>` or `/help command:<name>` for details."
+        ),
+        color=discord.Color.blue(),
+    )
+    for name, desc in _general_commands_list(guild_id):
+        embed.add_field(name=name, value=desc, inline=False)
+    return embed
+
+
+_LEAGUE_RELATED_COMMANDS = (
+    ("-ladmin", "Admin view: show all leagues (discovered and undiscovered)."),
+    ("-ladd <number>", "Create league ranges and sync roles (admin only)."),
+    ("-ledit", "Edit league boundaries (admin only)."),
+    ("-lapply", "Re-apply league roles for all registered players (admin only)."),
+    ("-lclear", "Remove all league roles and clear all leagues (admin only)."),
+    ("-lcancel", "Cancel any running league task in this channel (admin only)."),
+    ("-lannounce <channel>", "Add a channel for league promotion/demotion announcements (admin only)."),
+    ("-lrannounce <channel>", "Remove a channel from league announcements (admin only)."),
+    ("-lhelp", "Show detailed help for all league-related commands."),
+)
+
+
+def build_command_detail_embed(entry: CommandHelp) -> discord.Embed:
+    alias_text = ", ".join(f"`{a}`" for a in entry.aliases) if entry.aliases else "None"
+    examples = "\n".join(f"- `{ex}`" for ex in entry.examples)
+    embed = discord.Embed(
+        title=f"Help - {entry.name}",
+        description=entry.description,
+        color=discord.Color.green(),
+    )
+    embed.add_field(name="Prefix syntax", value=f"`{entry.syntax}`", inline=False)
+    if entry.is_slash:
+        embed.add_field(name="Slash syntax", value=f"`{entry.slash_syntax}`", inline=False)
+    embed.add_field(name="Permission", value=entry.permission, inline=True)
+    embed.add_field(name="Aliases", value=alias_text, inline=True)
+    embed.add_field(name="Examples", value=examples or "-", inline=False)
+
+    if entry.name == "leagues":
+        related = "\n".join(f"- `{cmd}` - {desc}" for cmd, desc in _LEAGUE_RELATED_COMMANDS)
+        embed.add_field(name="Related league commands", value=related, inline=False)
+
+    return embed
 
 
 class HelpCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
 
-    @commands.command(
-        name="qna",
-        help="Hiển thị danh sách câu hỏi thường gặp / Show frequently asked questions.",
-    )
-    async def qna(self, ctx: commands.Context):
-        faqs = {
-            "vn": [
-                (
-                    "**Q: Tôi đã nhập một câu lệnh hợp lệ, nhưng không có gì xảy ra.**",
-                    "A: Có thể bạn đã nhập lệnh ở sai kênh, bot chỉ được gửi tin nhắn ở các kênh mà bot được cho phép.",
-                ),
-                (
-                    "**Q: Bot tính điểm Elo dựa trên công thức nào?**",
-                    "A: Công thức của Autony.",
-                ),
-                (
-                    "**Q: Tại sao đôi lúc bot không hoạt động?**",
-                    "A: Bot sẽ tự đóng sau một khoảng thời gian để tránh quá tải, thường là từ 10 đến 15 phút.",
-                ),
-                (
-                    "**Q: Tại sao một số lệnh không còn hoạt động và hiện <This interaction failed> sau một thời gian?**",
-                    "A: Vì nếu các lệnh đó chạy liên tục sẽ gây ra tình trạng quá tải cho bot, vì thế bot tự động đóng nó và chờ lần sử dụng tiếp theo",
-                ),
-                (
-                    "**Q: Tôi có thể xem mã nguồn của bot không?**",
-                    "A: Không, dev không muốn công khai nó.",
-                ),
-                (
-                    "**Q: Bot có được cập nhật để hỗ trợ bo3 không?**",
-                    "A: Không, bo3 không được công bằng (nếu bạn cho dev 1000$ thì hắn sẽ nghĩ lại).",
-                ),
-                ("**Q: Bot được viết trong ngôn ngữ nào?**", "A: Python."),
-                ("**Q: Dev có ngu không?**", "A: Có, dev ngu như bò."),
-            ],
-            "en": [
-                (
-                    "**Q: I typed a valid command, but nothing happened.**",
-                    "A: Maybe you typed the command in the wrong channel, the bot can only send messages in allowed channels.",
-                ),
-                (
-                    "**Q: What formula does the bot use to calculate Elo scores?**",
-                    "A: Autony's formula.",
-                ),
-                (
-                    "**Q: Why does the bot sometimes not work?**",
-                    "A: The bot will automatically close after a period of time to avoid overloading, usually from 10 to 15 minutes.",
-                ),
-                (
-                    "**Q: Why do some commands stop working and show <This interaction failed> after a while?**",
-                    "A: Because if those commands run continuously, it will cause the bot to overload, so the bot automatically closes it and waits for the next use.",
-                ),
-                (
-                    "**Q: Can I see the bot's source code?**",
-                    "A: No, the dev doesn't want to make it public.",
-                ),
-                (
-                    "**Q: Will the bot be updated to support bo3?**",
-                    "A: No, bo3 is not fair (if you gave the dev $1000, he would think again).",
-                ),
-                (
-                    "**Q: What programming language is this bot coded in?**",
-                    "A: Python.",
-                ),
-                ("**Q: Is the dev stupid?**", "A: Yes, the dev is stupid as hell."),
-            ],
-        }
-
-        def create_embed(language):
-            embed = discord.Embed(
-                title=(
-                    "📖 Câu Hỏi Thường Gặp"
-                    if language == "vn"
-                    else "📖 Frequently Asked Questions"
-                ),
-                color=discord.Color.purple(),
-            )
-            for question, answer in faqs[language]:
-                embed.add_field(name=question, value=answer, inline=False)
-            return embed
-
-        class LanguageSelect(discord.ui.View):
-            def __init__(self):
-                super().__init__()
-                self.language = "en"
-
-            @discord.ui.select(
-                placeholder="Chọn ngôn ngữ / Choose language",
-                options=[
-                    discord.SelectOption(label="English", value="en", emoji="🇺🇸"),
-                    discord.SelectOption(label="Tiếng Việt", value="vn", emoji="🇻🇳"),
-                ],
-            )
-            async def select_callback(
-                self, interaction: discord.Interaction, select: discord.ui.Select
-            ):
-                self.language = select.values[0]
-                await interaction.response.edit_message(
-                    embed=create_embed(self.language)
+    async def _help_impl(self, ctx: commands.Context, command: str | None = None) -> None:
+        if command:
+            entry = lookup_command_help(command)
+            if entry is None:
+                await ctx.send(
+                    embed=discord.Embed(
+                        title="Command Not Found",
+                        description=(
+                            f"No help entry for `{command}`.\n"
+                            "Use `-help` without arguments to see all commands."
+                        ),
+                        color=discord.Color.red(),
+                    )
                 )
+                return
+            await ctx.send(embed=build_command_detail_embed(entry))
+            return
 
-        view = LanguageSelect()
-        await ctx.send(embed=create_embed("en"), view=view)
+        await ctx.send(embed=build_overview_embed(ctx.guild.id))
 
-    @commands.command(name="help", help="Show available commands.")
-    async def help_command(self, ctx: commands.Context):
-        commands_list = [
-            ("-qna", "Show frequently asked questions."),
-            ("-register <name>", "Register with a custom name and initial 500 Elo."),
-            ("-rename <new_name>", "Change your name (7-day cooldown)."),
-            ("-report / -rp <@player1> <score> <@player2>", "Report a match result."),
-        ]
-        if get_seasonal_report_enabled(ctx.guild.id):
-            commands_list.append(
-                (
-                    "-seasonal_report / -srp <@player1> <score> <@player2>",
-                    "Report a seasonal match (1.5x Elo). Same usage as -report.",
-                ),
-            )
-        commands_list.extend(
-            [
-                (
-                    "-leaderboard / lb",
-                    "Show the leaderboard of players based on various stats.",
-                ),
-                ("-lbs", "Show the leaderboards for each season."),
-                (
-                    "-stats / -stats <player>",
-                    "Show your stats / Show the mentioned player's stats. <player> can be @mention, Discord ID, or registered name.",
-                ),
-                (
-                    "-compare / -cp <player1> <player2>",
-                    "Compare two players. <player> can be @mention, Discord ID, or registered name.",
-                ),
-                (
-                    "-leagues / -leagues <name>",
-                    "Show discovered leagues, Elo ranges, and player counts. "
-                    "Add a name (substring match) to list everyone in that league.",
-                ),
-                ("-help", "Show this help message."),
-                ("-adhelp", "Show the admin help message."),
-            ]
+    @commands.hybrid_command(
+        name="help",
+        description="Show available commands or detailed help for one command.",
+        with_app_command=True,
+    )
+    @app_commands.describe(command="Command name for detailed help (optional)")
+    @app_commands.autocomplete(command=help_command_autocomplete)
+    @app_commands.guild_only()
+    async def help_command(
+        self, ctx: commands.Context, command: str | None = None
+    ):
+        await self._help_impl(ctx, command)
+
+    @commands.hybrid_command(
+        name="info",
+        description="Show information about the bot.",
+        help="Show information about the bot.",
+        with_app_command=True,
+    )
+    async def info(self, ctx: commands.Context):
+        current_time = datetime.now(timezone.utc).strftime("%d %b %Y, %H:%M:%S UTC")
+
+        prefix_command_names = {cmd.qualified_name for cmd in self.bot.commands}
+        tree_command_names = {cmd.qualified_name for cmd in self.bot.tree.get_commands()}
+        command_count = len(prefix_command_names | tree_command_names)
+
+        embed = discord.Embed(
+            title="Elo Bot Information",
+            description="> A Discord bot built for managing Elo-based PvZH competitions.",
+            color=discord.Color.blue(),
+        )
+        if self.bot.user:
+            embed.set_thumbnail(url=self.bot.user.display_avatar.url)
+
+        embed.add_field(name="Developer", value="Senko", inline=True)
+        embed.add_field(name="Created", value="8 Dec 2024", inline=True)
+        embed.add_field(name="Programming Language", value="Python 3.13", inline=True)
+        embed.add_field(name="Library", value="discord.py 2.7.1", inline=True)
+        embed.add_field(name="Bot Time (UTC)", value=current_time, inline=True)
+        embed.add_field(name="Commands", value=str(command_count), inline=True)
+        embed.add_field(
+            name="\u200b",
+            value=(
+                "Thank you for using Elo Bot! ❤️\n"
+                "If you encounter any issues or have suggestions, feel free to "
+                "contact <@674610469977194521>."
+            ),
+            inline=False,
         )
 
-        def create_embed():
-            embed = discord.Embed(
-                title="📜 Help - General Commands",
-                description="Available commands:",
-                color=discord.Color.blue(),
-            )
-            for name, desc in commands_list:
-                embed.add_field(name=name, value=desc, inline=False)
-            return embed
+        await ctx.send(embed=embed)
 
-        await ctx.send(embed=create_embed())
-
-    @commands.command(name="adhelp", help="Show admin-only commands.")
-    async def admin_help_command(self, ctx: commands.Context):
+    @commands.hybrid_command(
+        name="adhelp",
+        help="Show admin-only commands.",
+        description="Show admin-only commands.",
+        with_app_command=True,
+    )
+    async def adhelp(self, ctx: commands.Context):
         stats_commands = [
             (
                 "-decay",
                 "Automatically **increase** or **decrease** Elo for all players.",
             ),
             ("-reset_e", "Set **Elo** for all players to 500."),
-            ("-set_e <@player> <elo>", "Set **Elo** for a specific player."),
+            ("-set_e <@player> <elo> / /set_e", "Set **Elo** for a specific player."),
             (
                 "-set_eid <discord_id> <elo>",
                 "Set **Elo** for a specific player using their Discord ID.",
             ),
             (
-                "-set_w <@player> <wins>",
+                "-set_w <@player> <wins> / /set_w",
                 "Set the **win count** of a specific player.",
             ),
             (
-                "-set_wid <discord_id> <wins>",
+                "-set_wid <discord_id> <wins> / /set_wid",
                 "Set the **win count** of a specific player using their Discord ID.",
             ),
             (
-                "-set_l <@player> <losses>",
+                "-set_l <@player> <losses> / /set_l",
                 "Set the **loss count** of a specific player.",
             ),
             (
-                "-set_lid <discord_id> <losses>",
+                "-set_lid <discord_id> <losses> / /set_lid",
                 "Set the **loss count** of a specific player using their Discord ID.",
             ),
             (
-                "-set_gid <discord_id> <games_played>",
+                "-set_gid <discord_id> <games_played> / /set_g",
                 "Set the **monthly games played** for a player using their Discord ID.",
             ),
             (
-                "-set_stats <discord_id> <elo> <wins> <losses> <games_played>",
+                "-set_stats <discord_id> <elo> <wins> <losses> <games_played> / /set_stats",
                 "Set all **stats** for a player using their Discord ID.",
             ),
             (
-                "-ad_rp <id1> <score1> <score2> <id2>  |  -ad_rp <id1> <score> <id2>  (score: 4-3, 3:1, 43)",
+                "-ad_rp / /ad_rp",
                 "Report a game result between two players using their Discord IDs.",
             ),
-        ]
-        if get_seasonal_report_enabled(ctx.guild.id):
-            stats_commands.append(
-                (
-                    "-ad_srp <winner_discord_id> <winner_score> <loser_score> <loser_discord_id>",
-                    "Report a seasonal match (1.5x Elo) using Discord IDs. Same args as -ad_rp.",
-                ),
-            )
-        stats_commands.append(
             (
-                "-gimmick on | off",
-                "Enable or disable seasonal report (1.5x Elo) for this server. When on, members can use -seasonal_report / -srp.",
+                "-revert / /revert",
+                "Revert a previously confirmed match report.",
             ),
-        )
+        ]
         admin_commands = {
             "register": [
                 (
-                    "-register_o <@player> <name>",
+                    "-register_o / /register_o",
                     "Register another player with a custom name.",
                 ),
                 (
-                    "-register_oid <discord_id> <name>",
+                    "-register_oid / /register_oid",
                     "Register another player using their Discord ID with a custom name.",
                 ),
                 (
-                    "-rename_o <@player> <new_name>",
+                    "-rename_o / /rename_o",
                     "Rename another player (no cooldown).",
                 ),
                 (
-                    "-rename_oid <discord_id> <new_name>",
+                    "-rename_oid / /rename_oid",
                     "Rename another player by Discord ID (no cooldown).",
                 ),
                 ("-d_reg <@player>", "Delete a player's registration."),
@@ -285,7 +321,14 @@ class HelpCog(commands.Cog):
                     if self.page == 0
                     else "📜 Admin Help - Stats Commands"
                 )
-                embed = discord.Embed(title=title, color=discord.Color.dark_red())
+                embed = discord.Embed(
+                    title=title,
+                    description=(
+                        "Available commands (prefix `-` or slash `/`):\n"
+                        "Use `-adhelp <command>` or `/adhelp command:<name>` for details."
+                    ),
+                    color=discord.Color.dark_red(),
+                )
                 for name, desc in admin_commands[page_type]:
                     embed.add_field(name=name, value=desc, inline=False)
                 return embed

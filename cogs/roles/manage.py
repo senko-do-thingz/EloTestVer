@@ -468,7 +468,7 @@ class RolesManageCog(RolesBaseCog):
         name="lannounce",
         help=(
             "Add a text channel for league promotion/demotion announcements. "
-            "Usage: -lannounce <channel> — numeric ID, #channel-picker, mention, or name."
+            "Usage: -lannounce <channel> - numeric ID, #channel-picker, mention, or name."
         ),
     )
     @commands.check(is_admin)

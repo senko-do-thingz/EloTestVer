@@ -226,7 +226,7 @@ class Counting(commands.Cog):
         leaderboard = get_counting_leaderboard(guild_id, channel_id, limit=10)
         if leaderboard:
             lb_lines = [
-                f"**{idx}.** <@{user_id}> — **{total_counts}** valid counts"
+                f"**{idx}.** <@{user_id}> - **{total_counts}** valid counts"
                 for idx, (user_id, total_counts) in enumerate(leaderboard, start=1)
             ]
             reason_lines.append("\n**Counting Leaderboard:**")

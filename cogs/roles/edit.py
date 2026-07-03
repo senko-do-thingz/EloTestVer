@@ -101,7 +101,7 @@ class RolesEditCog(RolesBaseCog):
             role_display = self._format_league_display(role_by_id, name, role_id)
             rng = self._format_range(min_elo, max_elo, min_kind, max_kind)
             status = "discovered" if discovered else "undiscovered"
-            current_lines.append(f"**{i}.** {role_display} — **{rng}** ({status})")
+            current_lines.append(f"**{i}.** {role_display} - **{rng}** ({status})")
 
         expected_lines = len(leagues_sorted)
         example = "Silver l 599 1\nGold 600 699 1\nPlatinum 700 h 0"
@@ -311,7 +311,7 @@ class RolesEditCog(RolesBaseCog):
             role_display = self._format_league_display(role_by_id, name, role_id)
             rng = self._format_range(min_elo, max_elo, min_kind, max_kind)
             status = "discovered" if discovered else "undiscovered"
-            lines.append(f"**{i}.** {role_display} — **{rng}** ({status})")
+            lines.append(f"**{i}.** {role_display} - **{rng}** ({status})")
 
         idx = await self._ask_reply_number(
             ctx,
@@ -347,7 +347,7 @@ class RolesEditCog(RolesBaseCog):
         await ctx.send(
             embed=discord.Embed(
                 title="Selected League",
-                description=f"Editing {sel_display} — **{sel_range}**",
+                description=f"Editing {sel_display} - **{sel_range}**",
                 color=discord.Color.blurple(),
             )
         )

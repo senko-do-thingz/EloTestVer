@@ -7,7 +7,7 @@ Internally, implementations live in submodules to match the project diagram.
 
 from datetime import datetime, timezone
 from .elo import calculate_elo, calculate_win_rate  # noqa: F401
-from .guards import is_admin, is_valid_name  # noqa: F401
+from .guards import NAME_RULE_TEXT, is_admin, is_admin_interaction, is_valid_name  # noqa: F401
 from db.h2h_db import (  # noqa: F401
     add_h2h_match,
     get_h2h_stats as get_head_to_head_stats,
@@ -34,7 +34,14 @@ from .league import (  # noqa: F401
     set_leagues,
     sync_league_roles,
 )
-from .rendering import render_leaderboard_image  # noqa: F401
+from .rendering import (  # noqa: F401
+    render_compare_image,
+    render_compare_image_async,
+    render_history_image,
+    render_history_image_async,
+    render_leaderboard_image,
+    render_leaderboard_image_async,
+)
 from .logger import bot_log, PRIVATE_GUILD_ID  # noqa: F401
 
 

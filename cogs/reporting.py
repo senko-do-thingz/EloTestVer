@@ -4,13 +4,20 @@ import re
 import typing
 
 import discord
+from discord import app_commands
 from discord.ext import commands
 
-from db.elo_db import db_connection, get_dev_mode, get_seasonal_report_enabled, set_seasonal_report_enabled
+from db.elo_db import db_connection, get_dev_mode
 from db.h2h_db import add_h2h_match
-from utils import calculate_elo, is_admin, sync_league_roles
+from db.match_history_db import (
+    add_match_history_row,
+    increment_player_matches,
+    next_match_id,
+)
+from utils import calculate_elo, is_admin, is_admin_interaction, sync_league_roles
 from utils.lb_cache import invalidate as lb_cache_invalidate, schedule_rebuild as lb_cache_rebuild
 from config import YES_EMOJI, NO_EMOJI
+from utils.slash_ctx import SlashContext
 
 logger = logging.getLogger(__name__)
 
@@ -97,8 +104,6 @@ class ReportingCog(commands.Cog):
         loser_elo: int,
         winner_score: int,
         loser_score: int,
-        *,
-        elo_multiplier: float = 1.0,
     ) -> dict:
         total_games = winner_score + loser_score
         # Bug #9 fix: guard against zero-division if scores are somehow both 0
@@ -113,7 +118,7 @@ class ReportingCog(commands.Cog):
         raw_gain = (
             self.RAW_GAIN_MULTIPLIER * total_games * (quotient - expected_winner)
             + self.SET_WIN_BONUS
-        ) * elo_multiplier
+        )
 
         score_gap = winner_score - loser_score
         sweep_factor = 1 - (self.SWEEP_REDUCTION_FACTOR * (score_gap - 1))
@@ -157,11 +162,11 @@ class ReportingCog(commands.Cog):
         player2: discord.User | None,
     ) -> tuple[discord.User, discord.User, int, int] | str:
         """
-        Parse các arguments của lệnh report.
-        Trả về (winner, loser, winner_score, loser_score) hoặc chuỗi lỗi.
+        Parse the arguments of the report command.
+        Returns (winner, loser, winner_score, loser_score) or an error string.
         """
         if player2 is None:
-            # Format cũ: @winner score @loser
+            # Old format: @winner score @loser
             if arg2 is None:
                 return "Invalid format. Please use either:\n- `-report @winner score @loser`\n- `-report @player1 score1 score2 @player2`"
 
@@ -188,7 +193,7 @@ class ReportingCog(commands.Cog):
                 winner, loser = loser, player1
 
         else:
-            # Format mới: @player1 score1 score2 @player2
+            # New format: @player1 score1 score2 @player2
             try:
                 p1_score, p2_score = int(arg1), int(arg2)
             except (ValueError, TypeError):
@@ -216,11 +221,9 @@ class ReportingCog(commands.Cog):
         arg2: typing.Optional[str],
         player2: typing.Optional[discord.User],
         *,
-        elo_multiplier: float = 1.0,
-        title_prefix: str = "",
         show_formula_comparison: bool = False,
     ):
-        """Shared implementation cho -report, -rp, -seasonal_report."""
+        """Shared implementation for -report, -rp."""
         lock_player_ids: set[int] = set()
         lock_acquired = False
 
@@ -228,7 +231,7 @@ class ReportingCog(commands.Cog):
         parse_result = await self._parse_score_args(player1, arg1, arg2, player2)
         if isinstance(parse_result, str):
             await ctx.send(embed=discord.Embed(
-                title=title_prefix + "Match Report Error",
+                title="Match Report Error",
                 description=parse_result,
                 color=discord.Color.red(),
             ))
@@ -238,7 +241,7 @@ class ReportingCog(commands.Cog):
 
         if winner == loser:
             await ctx.send(embed=discord.Embed(
-                title=title_prefix + "Match Report Error",
+                title="Match Report Error",
                 description="A player cannot report a match against themselves.",
                 color=discord.Color.red(),
             ))
@@ -246,7 +249,7 @@ class ReportingCog(commands.Cog):
 
         if winner_score not in [3, 4]:
             await ctx.send(embed=discord.Embed(
-                title=title_prefix + "Match Report Error",
+                title="Match Report Error",
                 description="Invalid match score. Winner's score must be 3 or 4.",
                 color=discord.Color.red(),
             ))
@@ -256,7 +259,7 @@ class ReportingCog(commands.Cog):
         guild_id = ctx.guild.id
         if not self._acquire_pending_report_lock(guild_id, lock_player_ids):
             await ctx.send(embed=discord.Embed(
-                title=title_prefix + "Match Report Error",
+                title="Match Report Error",
                 description=(
                     f"<@{winner.id}> or <@{loser.id}> already has a pending report.\n"
                     "Please wait until the current report is confirmed or canceled."
@@ -284,7 +287,7 @@ class ReportingCog(commands.Cog):
                 else:
                     desc = f"<@{loser.id}> is not registered. Use `-register <name>` to register."
                 await ctx.send(embed=discord.Embed(
-                    title=title_prefix + "Match Report Error",
+                    title="Match Report Error",
                     description=desc,
                     color=discord.Color.red(),
                 ))
@@ -303,7 +306,6 @@ class ReportingCog(commands.Cog):
 
             preview_calc = self._calculate_new_formula(
                 preview_winner_elo, preview_loser_elo, winner_score, loser_score,
-                elo_multiplier=elo_multiplier,
             )
             preview_new_winner_elo = preview_calc["new_winner_elo"]
             preview_new_loser_elo = preview_calc["new_loser_elo"]
@@ -315,7 +317,7 @@ class ReportingCog(commands.Cog):
                 base_winner_elo, base_loser_elo = calculate_elo(
                     preview_winner_elo, preview_loser_elo, total_games, winner_score, loser_score
                 )
-                old_actual_gain = round((base_winner_elo - preview_winner_elo) * elo_multiplier)
+                old_actual_gain = round(base_winner_elo - preview_winner_elo)
                 bonus_text = f"{preview_calc['bonus_raw']:.2f}".rstrip("0").rstrip(".")
                 comparison_text = (
                     "\n**Dev Mode - Old vs New Formula:**\n"
@@ -331,9 +333,9 @@ class ReportingCog(commands.Cog):
                     f"New formula: {preview_new_winner_elo} / {preview_new_loser_elo}\n"
                 )
 
-            # --- Gửi embed pending và chờ reaction ---
+            # --- Send pending embed and wait for reaction ---
             embed = discord.Embed(
-                title=title_prefix + "Match Pending Confirmation",
+                title="Match Pending Confirmation",
                 description=(
                     f"**{winner_name}** defeated **{loser_name}** with a score of {winner_score}-{loser_score}.\n"
                     f"**New Elo Ratings Preview:**\n"
@@ -370,7 +372,7 @@ class ReportingCog(commands.Cog):
                         canceling_name = winner_name if winner in reactions[NO_EMOJI] else loser_name
                         await self._remove_bot_reactions(message)
                         await message.edit(embed=discord.Embed(
-                            title=title_prefix + "Match Report Canceled",
+                            title="Match Report Canceled",
                             description=(
                                 f"**{canceling_name}** canceled the match report.\n"
                                 "No Elo changes were applied."
@@ -381,7 +383,7 @@ class ReportingCog(commands.Cog):
             except asyncio.TimeoutError:
                 await self._remove_bot_reactions(message)
                 await message.edit(embed=discord.Embed(
-                    title=title_prefix + "Match Confirmation Timeout",
+                    title="Match Confirmation Timeout",
                     description="Match report canceled due to timeout. Please try again.\nNo Elo changes were applied.",
                     color=discord.Color.red(),
                 ))
@@ -407,7 +409,7 @@ class ReportingCog(commands.Cog):
 
                 if not winner_fresh or not loser_fresh:
                     await ctx.send(embed=discord.Embed(
-                        title=title_prefix + "Match Report Error",
+                        title="Match Report Error",
                         description="A player was unregistered while the report was pending. No changes applied.",
                         color=discord.Color.red(),
                     ))
@@ -418,7 +420,6 @@ class ReportingCog(commands.Cog):
 
                 calc = self._calculate_new_formula(
                     winner_elo, loser_elo, winner_score, loser_score,
-                    elo_multiplier=elo_multiplier,
                 )
                 new_winner_elo = calc["new_winner_elo"]
                 new_loser_elo = calc["new_loser_elo"]
@@ -459,19 +460,42 @@ class ReportingCog(commands.Cog):
                 add_h2h_match(
                     cursor, loser.id, winner_name, loser_score, winner_score
                 )
+                match_id = next_match_id(cursor)
+                add_match_history_row(
+                    cursor,
+                    match_id=match_id,
+                    player_id=winner.id,
+                    opponent_name=loser_name,
+                    wins=winner_score,
+                    losses=loser_score,
+                    elo_init=winner_elo,
+                    elo_final=new_winner_elo,
+                )
+                add_match_history_row(
+                    cursor,
+                    match_id=match_id,
+                    player_id=loser.id,
+                    opponent_name=winner_name,
+                    wins=loser_score,
+                    losses=winner_score,
+                    elo_init=loser_elo,
+                    elo_final=new_loser_elo,
+                )
+                increment_player_matches(cursor, winner.id)
+                increment_player_matches(cursor, loser.id)
                 conn.commit()
-            # Connection đã đóng – sync_league_roles có thể mở DB tự do
+            # Connection closed - sync_league_roles can open the DB freely
 
-            # Invalidate cache và rebuild ngay sau khi Elo thay đổi
+            # Invalidate cache and rebuild right after the Elo change
             lb_cache_invalidate(ctx.guild.id)
             lb_cache_rebuild(self.bot, ctx.guild.id)
 
-            # Chỉ sync 2 player liên quan, không scan toàn bộ guild
+            # Only sync the 2 relevant players, don't scan the whole guild
             await sync_league_roles(ctx.guild, player_ids=[winner.id, loser.id])
 
             await self._remove_bot_reactions(message)
             await message.edit(embed=discord.Embed(
-                title=title_prefix + "Match Confirmed",
+                title="Match Confirmed",
                 description=(
                     f"**{winner_name}** defeated **{loser_name}** with a score of {winner_score}-{loser_score}.\n"
                     f"New Elo Ratings:\n"
@@ -484,7 +508,7 @@ class ReportingCog(commands.Cog):
         except Exception as e:
             logger.exception("Unexpected error in _report_impl for guild %s", ctx.guild.id)
             await ctx.send(embed=discord.Embed(
-                title=title_prefix + "Match Report Error",
+                title="Match Report Error",
                 description=(
                     f"An unexpected error occurred: {e}\n"
                     "Please use the format: `-report @player1 score1 score2 @player2` or `-report @winner score @loser`"
@@ -506,11 +530,8 @@ class ReportingCog(commands.Cog):
         winner_score: int,
         loser_score: int,
         loser_id: int,
-        *,
-        elo_multiplier: float = 1.0,
-        title_prefix: str = "",
     ):
-        """Shared implementation cho -ad_rp và -ad_srp."""
+        """Shared implementation for -ad_rp."""
         lock_player_ids: set[int] = set()
         lock_acquired = False
 
@@ -527,7 +548,7 @@ class ReportingCog(commands.Cog):
         except Exception as e:
             logger.exception("fetch_user failed in _ad_rp_impl")
             await ctx.send(embed=discord.Embed(
-                title=title_prefix + "Match Report Error",
+                title="Match Report Error",
                 description=f"An error occurred: {e}\n{self._AD_RP_USAGE}",
                 color=discord.Color.red(),
             ))
@@ -536,7 +557,7 @@ class ReportingCog(commands.Cog):
         try:
             if winner == loser:
                 await ctx.send(embed=discord.Embed(
-                    title=title_prefix + "Match Report Error",
+                    title="Match Report Error",
                     description="A player cannot report a match against themselves.",
                     color=discord.Color.red(),
                 ))
@@ -548,7 +569,7 @@ class ReportingCog(commands.Cog):
 
             if winner_score == loser_score:
                 await ctx.send(embed=discord.Embed(
-                    title=title_prefix + "Match Report Error",
+                    title="Match Report Error",
                     description="Scores cannot be equal. There must be a winner.",
                     color=discord.Color.red(),
                 ))
@@ -556,7 +577,7 @@ class ReportingCog(commands.Cog):
 
             if winner_score not in [3, 4]:
                 await ctx.send(embed=discord.Embed(
-                    title=title_prefix + "Match Report Error",
+                    title="Match Report Error",
                     description="Invalid match score. Winner's score must be 3 or 4.",
                     color=discord.Color.red(),
                 ))
@@ -566,7 +587,7 @@ class ReportingCog(commands.Cog):
             guild_id = ctx.guild.id
             if not self._acquire_pending_report_lock(guild_id, lock_player_ids):
                 await ctx.send(embed=discord.Embed(
-                    title=title_prefix + "Match Report Error",
+                    title="Match Report Error",
                     description=(
                         f"<@{winner.id}> or <@{loser.id}> already has a pending report.\n"
                         "Please wait until the current report is confirmed or canceled."
@@ -576,7 +597,7 @@ class ReportingCog(commands.Cog):
                 return
             lock_acquired = True
 
-            # --- Đọc player data, đóng connection ngay ---
+            # --- Read player data, close connection right away ---
             with db_connection(ctx.guild.id) as (conn, cursor):
                 cursor.execute(
                     "SELECT elo, games_won, games_lost, name FROM players WHERE id=?",
@@ -597,7 +618,7 @@ class ReportingCog(commands.Cog):
                 else:
                     desc = f"<@{loser.id}> is not registered."
                 await ctx.send(embed=discord.Embed(
-                    title=title_prefix + "Match Report Error",
+                    title="Match Report Error",
                     description=desc + " Use `-register <name>` to register.",
                     color=discord.Color.red(),
                 ))
@@ -608,7 +629,6 @@ class ReportingCog(commands.Cog):
 
             calc = self._calculate_new_formula(
                 winner_elo, loser_elo, winner_score, loser_score,
-                elo_multiplier=elo_multiplier,
             )
             new_winner_elo = calc["new_winner_elo"]
             new_loser_elo = calc["new_loser_elo"]
@@ -617,7 +637,7 @@ class ReportingCog(commands.Cog):
             total_games = winner_score + loser_score
 
             embed = discord.Embed(
-                title=title_prefix + "Match Pending Confirmation",
+                title="Match Pending Confirmation",
                 description=(
                     f"**{winner_name}** defeated **{loser_name}** with a score of {winner_score}-{loser_score}.\n"
                     f"**New Elo Ratings Preview:**\n"
@@ -644,7 +664,7 @@ class ReportingCog(commands.Cog):
                 if str(reaction.emoji) != YES_EMOJI:
                     await self._remove_bot_reactions(message)
                     await message.edit(embed=discord.Embed(
-                        title=title_prefix + "Match Report Canceled",
+                        title="Match Report Canceled",
                         description=(
                             "The match report has been canceled.\n"
                             "No Elo changes were applied.\n"
@@ -657,7 +677,7 @@ class ReportingCog(commands.Cog):
             except asyncio.TimeoutError:
                 await self._remove_bot_reactions(message)
                 await message.edit(embed=discord.Embed(
-                    title=title_prefix + "Match Confirmation Timeout",
+                    title="Match Confirmation Timeout",
                     description=(
                         "Match report canceled due to timeout. Please try again.\n"
                         "No Elo changes were applied.\n"
@@ -668,7 +688,7 @@ class ReportingCog(commands.Cog):
                 ))
                 return
 
-            # --- Commit, đóng connection, rồi sync roles ---
+            # --- Commit, close connection, then sync roles ---
             with db_connection(ctx.guild.id) as (conn, cursor):
                 cursor.execute(
                     """
@@ -704,6 +724,29 @@ class ReportingCog(commands.Cog):
                 add_h2h_match(
                     cursor, loser.id, winner_name, loser_score, winner_score
                 )
+                match_id = next_match_id(cursor)
+                add_match_history_row(
+                    cursor,
+                    match_id=match_id,
+                    player_id=winner.id,
+                    opponent_name=loser_name,
+                    wins=winner_score,
+                    losses=loser_score,
+                    elo_init=winner_elo,
+                    elo_final=new_winner_elo,
+                )
+                add_match_history_row(
+                    cursor,
+                    match_id=match_id,
+                    player_id=loser.id,
+                    opponent_name=winner_name,
+                    wins=loser_score,
+                    losses=winner_score,
+                    elo_init=loser_elo,
+                    elo_final=new_loser_elo,
+                )
+                increment_player_matches(cursor, winner.id)
+                increment_player_matches(cursor, loser.id)
                 conn.commit()
 
             lb_cache_invalidate(ctx.guild.id)
@@ -713,7 +756,7 @@ class ReportingCog(commands.Cog):
 
             await self._remove_bot_reactions(message)
             await message.edit(embed=discord.Embed(
-                title=title_prefix + "Match Confirmed",
+                title="Match Confirmed",
                 description=(
                     f"**{winner_name}** defeated **{loser_name}** with a score of {winner_score}-{loser_score}.\n"
                     f"New Elo Ratings:\n"
@@ -726,7 +769,7 @@ class ReportingCog(commands.Cog):
         except Exception as e:
             logger.exception("Unexpected error in _ad_rp_impl for guild %s", ctx.guild.id)
             await ctx.send(embed=discord.Embed(
-                title=title_prefix + "Match Report Error",
+                title="Match Report Error",
                 description=f"An unexpected error occurred: {e}\n{self._AD_RP_USAGE}",
                 color=discord.Color.red(),
             ))
@@ -769,61 +812,6 @@ class ReportingCog(commands.Cog):
             show_formula_comparison=get_dev_mode(ctx.guild.id),
         )
 
-    @commands.command(
-        name="gimmick",
-        help="Enable or disable seasonal report (1.5x Elo). Admin only. Usage: -gimmick on | off",
-    )
-    @commands.check(is_admin)
-    async def gimmick(self, ctx: commands.Context, on_off: str):
-        if on_off.lower() not in ("on", "off"):
-            await ctx.send(embed=discord.Embed(
-                title="Invalid Argument",
-                description="Use `-gimmick on` or `-gimmick off`.",
-                color=discord.Color.red(),
-            ))
-            return
-        enabled = on_off.lower() == "on"
-        set_seasonal_report_enabled(ctx.guild.id, enabled)
-        await ctx.send(embed=discord.Embed(
-            title="Seasonal Report",
-            description=(
-                f"Seasonal report is now **{'enabled' if enabled else 'disabled'}**."
-                + (" Members can use `-seasonal_report` or `-srp` to report matches with 1.5x Elo." if enabled else "")
-            ),
-            color=discord.Color.green(),
-        ))
-
-    @gimmick.error
-    async def gimmick_error(self, ctx: commands.Context, error):
-        if isinstance(error, commands.CheckFailure):
-            await ctx.send(embed=discord.Embed(
-                title="Permission Denied",
-                description="You do not have permission to use this command.",
-                color=discord.Color.red(),
-            ))
-
-    @commands.command(
-        name="seasonal_report",
-        aliases=["srp"],
-        help="Report a seasonal match (1.5x Elo).",
-    )
-    async def seasonal_report(
-        self,
-        ctx: commands.Context,
-        player1: discord.User,
-        arg1: str,
-        arg2: typing.Optional[str] = None,
-        player2: typing.Optional[discord.User] = None,
-    ):
-        if not get_seasonal_report_enabled(ctx.guild.id):
-            await ctx.send(embed=discord.Embed(
-                title="Seasonal Report Disabled",
-                description="Seasonal report is currently disabled.",
-                color=discord.Color.red(),
-            ))
-            return
-        await self._report_impl(ctx, player1, arg1, arg2, player2, elo_multiplier=1.5, title_prefix="Seasonal ")
-
     # ------------------------------------------------------------------
     # Admin report commands (ad_rp)
     # ------------------------------------------------------------------
@@ -833,20 +821,17 @@ class ReportingCog(commands.Cog):
         ctx: commands.Context,
         player1_id: int,
         args: tuple[str, ...],
-        *,
-        elo_multiplier: float = 1.0,
-        title_prefix: str = "",
     ):
         parsed = self._parse_ad_rp_args(player1_id, args)
         if not parsed:
             await ctx.send(embed=discord.Embed(
-                title=title_prefix + "Match Report Error",
+                title="Match Report Error",
                 description=f"Invalid format or score.\n{self._AD_RP_USAGE}\nScore examples: `4-3`, `3:1`, `43`, `4 2`.",
                 color=discord.Color.red(),
             ))
             return
         p1_id, s1, s2, p2_id = parsed
-        await self._ad_rp_impl(ctx, p1_id, s1, s2, p2_id, elo_multiplier=elo_multiplier, title_prefix=title_prefix)
+        await self._ad_rp_impl(ctx, p1_id, s1, s2, p2_id)
 
     @commands.command(
         name="ad_rp",
@@ -871,24 +856,94 @@ class ReportingCog(commands.Cog):
                 color=discord.Color.red(),
             ))
 
-    @commands.command(
-        name="ad_srp",
-        help="Report a seasonal match (1.5x Elo) using Discord IDs (admin only). Same args as -ad_rp.",
-    )
-    @commands.check(is_admin)
-    async def ad_srp(self, ctx: commands.Context, player1_id: int, *args: str):
-        await self._run_ad_rp_command(ctx, player1_id, args, elo_multiplier=1.5, title_prefix="Seasonal ")
+    async def cog_app_command_error(
+        self, interaction: discord.Interaction, error: app_commands.AppCommandError
+    ) -> None:
+        """Slash-command counterpart of ad_rp_error.
 
-    @ad_srp.error
-    async def ad_srp_error(self, ctx: commands.Context, error):
-        if isinstance(error, commands.CheckFailure):
-            await ctx.send(embed=discord.Embed(
+        Without this, an app_commands.CheckFailure from is_admin_interaction
+        (used on /ad_rp) is never caught, so the interaction is left
+        unanswered and Discord shows "The application did not respond"
+        instead of a proper permission-denied message.
+        """
+        if isinstance(error, app_commands.CheckFailure):
+            embed = discord.Embed(
                 title="Permission Denied",
                 description="You do not have permission to use this command.",
                 color=discord.Color.red(),
-            ))
+            )
+            if interaction.response.is_done():
+                await interaction.followup.send(embed=embed, ephemeral=True)
+            else:
+                await interaction.response.send_message(embed=embed, ephemeral=True)
+            return
+        raise error
+
+    # ------------------------------------------------------------------
+    # Slash commands (structured inputs; prefix keeps legacy parsing)
+    # ------------------------------------------------------------------
+
+    @app_commands.command(
+        name="report",
+        description="Report a match between two registered players. The player with the higher score wins.",
+    )
+    @app_commands.describe(
+        player1="First player",
+        p1_score="Player 1's set score (0-4)",
+        p2_score="Player 2's set score (0-4)",
+        player2="Second player",
+    )
+    @app_commands.guild_only()
+    async def slash_report(
+        self,
+        interaction: discord.Interaction,
+        player1: discord.Member,
+        p1_score: app_commands.Range[int, 0, 4],
+        p2_score: app_commands.Range[int, 0, 4],
+        player2: discord.Member,
+    ):
+        ctx = SlashContext(interaction)
+        await self._report_impl(
+            ctx,
+            player1,
+            str(p1_score),
+            str(p2_score),
+            player2,
+            show_formula_comparison=get_dev_mode(interaction.guild_id),
+        )
+
+    @app_commands.command(name="ad_rp", description="Report a match using Discord IDs (admin only).")
+    @app_commands.describe(
+        player1_id="First player's Discord ID",
+        winner_score="Winner's set score (3 or 4)",
+        loser_score="Loser's set score",
+        player2_id="Second player's Discord ID",
+    )
+    @app_commands.guild_only()
+    @app_commands.check(is_admin_interaction)
+    async def slash_ad_rp(
+        self,
+        interaction: discord.Interaction,
+        player1_id: str,
+        winner_score: app_commands.Range[int, 0, 4],
+        loser_score: app_commands.Range[int, 0, 3],
+        player2_id: str,
+    ):
+        try:
+            p1_id, p2_id = int(player1_id), int(player2_id)
+        except ValueError:
+            await interaction.response.send_message(
+                embed=discord.Embed(
+                    title="Match Report Error",
+                    description="Invalid Discord ID format.",
+                    color=discord.Color.red(),
+                ),
+                ephemeral=True,
+            )
+            return
+        ctx = SlashContext(interaction)
+        await self._ad_rp_impl(ctx, p1_id, winner_score, loser_score, p2_id)
 
 
 async def setup(bot: commands.Bot):
     await bot.add_cog(ReportingCog(bot))
-    

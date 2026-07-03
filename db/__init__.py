@@ -13,10 +13,8 @@ from .elo_db import (  # noqa: F401
     get_dev_mode,
     get_language,
     get_log_channel_id,
-    get_seasonal_report_enabled,
     set_dev_mode,
     set_log_channel_id,
-    set_seasonal_report_enabled,
 )
 from .h2h_db import (  # noqa: F401
     add_h2h_match,

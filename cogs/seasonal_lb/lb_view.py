@@ -52,8 +52,20 @@ class NoDataView(discord.ui.View):
     """Minimal view shown when a leaderboard file is missing or empty."""
 
     def __init__(self, lb_view: "LBView"):
-        super().__init__(timeout=None)
+        # Modified: synced timeout with LBView/-lb so the "Back" button here
+        # also auto-disables instead of staying interactive indefinitely.
+        super().__init__(timeout=3600.0)
+        self.lb_view = lb_view
         self.add_item(_BackToLBButton(lb_view))
+
+    async def on_timeout(self) -> None:
+        for item in self.children:
+            item.disabled = True
+        if self.lb_view.message:
+            try:
+                await self.lb_view.message.edit(view=self)
+            except Exception:
+                pass
 
 
 class _BackToLBButton(discord.ui.Button):
@@ -343,7 +355,9 @@ class LBView(discord.ui.View):
         category: str = "elo",
         bot=None,
     ):
-        super().__init__(timeout=None)
+        # Modified: timeout synced with LeaderboardView (-lb) so -lbs buttons
+        # also auto-disable after inactivity instead of staying active forever.
+        super().__init__(timeout=3600.0)
         self.season = season
         self.month = month
         self.mpath = mpath
@@ -354,6 +368,7 @@ class LBView(discord.ui.View):
         self.per_page = 10
         self.total_pages = 1
         self.bot = bot
+        self.message: discord.Message | None = None
 
         # Back button is added by the caller (season_view.py) so it can close
         # back to the correct MonthView.  We reserve a slot by requiring callers
@@ -369,6 +384,17 @@ class LBView(discord.ui.View):
         self._back_btn = btn
         self.add_item(btn)
         self.update_buttons()
+
+    async def on_timeout(self) -> None:
+        # Modified: mirror LeaderboardView.on_timeout() so -lbs pagination
+        # controls also become non-interactive after the view times out.
+        for item in self.children:
+            item.disabled = True
+        if self.message:
+            try:
+                await self.message.edit(view=self)
+            except Exception:
+                pass
 
     # ── helpers ─────────────────────────────────────────────────────────────
 
@@ -427,6 +453,7 @@ class LBView(discord.ui.View):
                     ),
                     view=NoDataView(self),
                 )
+                self.message = interaction.message
                 return
 
             # ── read file ───────────────────────────────────────────────────
@@ -444,6 +471,7 @@ class LBView(discord.ui.View):
                     ),
                     view=NoDataView(self),
                 )
+                self.message = interaction.message
                 return
 
             # ── parse lines ─────────────────────────────────────────────────
@@ -461,6 +489,7 @@ class LBView(discord.ui.View):
                     ),
                     view=NoDataView(self),
                 )
+                self.message = interaction.message
                 return
 
             players_data = [
@@ -516,6 +545,9 @@ class LBView(discord.ui.View):
             await interaction.response.edit_message(
                 embed=embed, attachments=[file], view=self
             )
+            # Modified: keep a message reference so on_timeout() can disable
+            # the buttons in place, matching LeaderboardView's behaviour.
+            self.message = interaction.message
 
         except Exception as e:
             if not interaction.response.is_done():

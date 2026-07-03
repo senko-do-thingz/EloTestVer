@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import discord
+from discord import app_commands
 from discord.ext import commands
 
 from utils import get_leagues, is_admin
@@ -13,13 +14,17 @@ from .base import RolesBaseCog
 class RolesViewCog(RolesBaseCog):
     """Commands: leagues, ladmin, lhelp."""
 
-    @commands.command(
+    @commands.hybrid_command(
         name="leagues",
+        description="Show league roles, Elo ranges, and player counts.",
         help=(
             "Show league roles, Elo ranges, and player counts. "
             "Usage: -leagues | -leagues <server_id> | -leagues <name> (substring match)"
         ),
+        with_app_command=True,
     )
+    @app_commands.describe(league_query="Server ID and/or league name substring (optional)")
+    @app_commands.guild_only()
     async def leagues(self, ctx: commands.Context, *, league_query: str = "") -> None:
         target_guild = ctx.guild
         q = league_query.strip()
@@ -97,14 +102,14 @@ class RolesViewCog(RolesBaseCog):
             if member_count > 0:
                 pop_stats.append((member_count, role_display))
             lines.append(
-                f"{role_display}: **{range_display}** — **{member_count}** player(s)"
+                f"{role_display}: **{range_display}** - **{member_count}** player(s)"
             )
 
         body = "\n".join(lines) if lines else "*No leagues discovered yet.*"
         if hidden_count > 0:
             body += (
                 f"\n\n*There are still {hidden_count} league(s) left to discover"
-                " — keep playing!*"
+                " - keep playing!*"
             )
 
         body += "\n\n**Population notes**" + self._population_notes_suffix(pop_stats)
@@ -177,7 +182,7 @@ class RolesViewCog(RolesBaseCog):
             status = "✅ discovered" if discovered else "🔒 undiscovered"
             member_ids = grouped.get(role_id, []) if role_id else []
             lines.append(
-                f"{role_display}: **{range_display}** — **{len(member_ids)}** player(s) [{status}]"
+                f"{role_display}: **{range_display}** - **{len(member_ids)}** player(s) [{status}]"
             )
 
         description = "\n".join(lines)

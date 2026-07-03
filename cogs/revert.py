@@ -3,12 +3,20 @@ import logging
 import re
 
 import discord
+from discord import app_commands
 from discord.ext import commands
 
 from db.elo_db import db_connection
-from utils import is_admin, sync_league_roles
+from db.match_history_db import (
+    decrement_player_matches,
+    delete_match_history_by_id,
+    find_latest_match_id_for_revert,
+    get_player_matches_count,
+)
+from utils import is_admin, is_admin_interaction, sync_league_roles
 from utils.lb_cache import invalidate as lb_cache_invalidate, schedule_rebuild as lb_cache_rebuild
 from config import YES_EMOJI, NO_EMOJI
+from utils.slash_ctx import SlashContext
 
 logger = logging.getLogger(__name__)
 
@@ -81,8 +89,6 @@ class RevertCog(commands.Cog):
         loser_elo: int,
         winner_score: int,
         loser_score: int,
-        *,
-        elo_multiplier: float = 1.0,
     ) -> dict:
         """Exact copy of ReportingCog._calculate_new_formula."""
         total_games = winner_score + loser_score
@@ -100,7 +106,7 @@ class RevertCog(commands.Cog):
         raw_gain = (
             self.RAW_GAIN_MULTIPLIER * total_games * (quotient - expected_winner)
             + self.SET_WIN_BONUS
-        ) * elo_multiplier
+        )
 
         score_gap = winner_score - loser_score
         sweep_factor = 1 - (self.SWEEP_REDUCTION_FACTOR * (score_gap - 1))
@@ -126,7 +132,6 @@ class RevertCog(commands.Cog):
         winner_score: int,
         loser_score: int,
         *,
-        elo_multiplier: float = 1.0,
         max_iter: int = 50,
     ) -> tuple[int, int]:
         """
@@ -138,7 +143,6 @@ class RevertCog(commands.Cog):
         for _ in range(max_iter):
             calc = self._calculate_new_formula(
                 est_w, est_l, winner_score, loser_score,
-                elo_multiplier=elo_multiplier,
             )
             new_est_w = cur_winner_elo - (calc["new_winner_elo"] - est_w)
             new_est_l = cur_loser_elo - (calc["new_loser_elo"] - est_l)
@@ -158,18 +162,15 @@ class RevertCog(commands.Cog):
         winner_score: int,
         loser_score: int,
         loser_id: int,
-        *,
-        elo_multiplier: float = 1.0,
-        title_prefix: str = "",
     ):
-        """Shared implementation for -revert and -srevert."""
+        """Shared implementation for -revert."""
         # --- Fetch users ---
         try:
             winner = await self.bot.fetch_user(winner_id)
             loser = await self.bot.fetch_user(loser_id)
         except discord.NotFound:
             await ctx.send(embed=discord.Embed(
-                title=title_prefix + "Revert Error",
+                title="Revert Error",
                 description="One or both users were not found with the provided Discord IDs.",
                 color=discord.Color.red(),
             ))
@@ -177,7 +178,7 @@ class RevertCog(commands.Cog):
         except Exception as e:
             logger.exception("fetch_user failed in _revert_impl")
             await ctx.send(embed=discord.Embed(
-                title=title_prefix + "Revert Error",
+                title="Revert Error",
                 description=f"An error occurred: {e}\n{self._REVERT_USAGE}",
                 color=discord.Color.red(),
             ))
@@ -186,7 +187,7 @@ class RevertCog(commands.Cog):
         # --- Validate ---
         if winner_id == loser_id:
             await ctx.send(embed=discord.Embed(
-                title=title_prefix + "Revert Error",
+                title="Revert Error",
                 description="A player cannot have a match against themselves.",
                 color=discord.Color.red(),
             ))
@@ -199,7 +200,7 @@ class RevertCog(commands.Cog):
 
         if winner_score == loser_score:
             await ctx.send(embed=discord.Embed(
-                title=title_prefix + "Revert Error",
+                title="Revert Error",
                 description="Scores cannot be equal. There must be a winner.",
                 color=discord.Color.red(),
             ))
@@ -207,7 +208,7 @@ class RevertCog(commands.Cog):
 
         if winner_score not in [3, 4]:
             await ctx.send(embed=discord.Embed(
-                title=title_prefix + "Revert Error",
+                title="Revert Error",
                 description="Invalid match score. Winner's score must be 3 or 4.",
                 color=discord.Color.red(),
             ))
@@ -234,7 +235,7 @@ class RevertCog(commands.Cog):
             else:
                 desc = f"<@{loser.id}> is not registered."
             await ctx.send(embed=discord.Embed(
-                title=title_prefix + "Revert Error",
+                title="Revert Error",
                 description=desc + " Use `-register <name>` to register.",
                 color=discord.Color.red(),
             ))
@@ -244,11 +245,30 @@ class RevertCog(commands.Cog):
         cur_loser_elo, cur_loser_wins, cur_loser_losses, cur_loser_monthly, loser_name = loser_row
         total_games = winner_score + loser_score
 
+        with db_connection(ctx.guild.id) as (conn, cursor):
+            winner_matches = get_player_matches_count(cursor, winner.id)
+            loser_matches = get_player_matches_count(cursor, loser.id)
+
+        if winner_matches < 1 or loser_matches < 1:
+            low_players = []
+            if winner_matches < 1:
+                low_players.append(f"**{winner_name}** (matches: {winner_matches})")
+            if loser_matches < 1:
+                low_players.append(f"**{loser_name}** (matches: {loser_matches})")
+            await ctx.send(embed=discord.Embed(
+                title="Revert Error",
+                description=(
+                    "Cannot revert: at least one player has no recorded matches to undo.\n"
+                    + "\n".join(low_players)
+                ),
+                color=discord.Color.red(),
+            ))
+            return
+
         # --- Recover pre-match Elos ---
         pre_winner_elo, pre_loser_elo = self._recover_pre_match_elos(
             cur_winner_elo, cur_loser_elo,
             winner_score, loser_score,
-            elo_multiplier=elo_multiplier,
         )
 
         winner_delta = cur_winner_elo - pre_winner_elo
@@ -258,7 +278,6 @@ class RevertCog(commands.Cog):
         verify = self._calculate_new_formula(
             pre_winner_elo, pre_loser_elo,
             winner_score, loser_score,
-            elo_multiplier=elo_multiplier,
         )
         has_mismatch = verify["new_winner_elo"] != cur_winner_elo or verify["new_loser_elo"] != cur_loser_elo
         mismatch_warning = ""
@@ -276,7 +295,7 @@ class RevertCog(commands.Cog):
         # red/danger color so the admin clearly sees this is an inexact revert.
         embed_color = discord.Color.red() if has_mismatch else discord.Color.orange()
         embed = discord.Embed(
-            title=title_prefix + "Match Revert Pending Confirmation",
+            title="Match Revert Pending Confirmation",
             description=(
                 f"Reverting match: **{winner_name}** {winner_score}-{loser_score} **{loser_name}**\n"
                 f"**Elo Ratings Preview:**\n"
@@ -303,7 +322,7 @@ class RevertCog(commands.Cog):
             if str(reaction.emoji) != YES_EMOJI:
                 await self._remove_bot_reactions(message)
                 await message.edit(embed=discord.Embed(
-                    title=title_prefix + "Match Revert Canceled",
+                    title="Match Revert Canceled",
                     description=(
                         "The match revert has been canceled.\n"
                         "No Elo changes were applied.\n"
@@ -316,7 +335,7 @@ class RevertCog(commands.Cog):
         except asyncio.TimeoutError:
             await self._remove_bot_reactions(message)
             await message.edit(embed=discord.Embed(
-                title=title_prefix + "Match Revert Timeout",
+                title="Match Revert Timeout",
                 description=(
                     "Match revert canceled due to timeout. Please try again.\n"
                     "No Elo changes were applied.\n"
@@ -329,6 +348,28 @@ class RevertCog(commands.Cog):
 
         # --- Commit revert; close connection before role sync ---
         with db_connection(ctx.guild.id) as (conn, cursor):
+            winner_matches = get_player_matches_count(cursor, winner.id)
+            loser_matches = get_player_matches_count(cursor, loser.id)
+            if winner_matches < 1 or loser_matches < 1:
+                await ctx.send(embed=discord.Embed(
+                    title="Revert Error",
+                    description=(
+                        "Revert canceled: a player's matches count would drop below 0."
+                    ),
+                    color=discord.Color.red(),
+                ))
+                return
+
+            match_id = find_latest_match_id_for_revert(
+                cursor,
+                winner.id,
+                loser.id,
+                winner_name,
+                loser_name,
+                winner_score,
+                loser_score,
+            )
+
             cursor.execute(
                 """
                 UPDATE players
@@ -354,6 +395,10 @@ class RevertCog(commands.Cog):
             # Reverse h2h_stats additions from the original report
             _subtract_h2h_match(cursor, winner.id, loser_name, winner_score, loser_score)
             _subtract_h2h_match(cursor, loser.id, winner_name, loser_score, winner_score)
+            if match_id is not None:
+                delete_match_history_by_id(cursor, match_id)
+            decrement_player_matches(cursor, winner.id)
+            decrement_player_matches(cursor, loser.id)
             conn.commit()
         # Connection closed – sync_league_roles can open DB freely
 
@@ -364,7 +409,7 @@ class RevertCog(commands.Cog):
 
         await self._remove_bot_reactions(message)
         await message.edit(embed=discord.Embed(
-            title=title_prefix + "Match Reverted",
+            title="Match Reverted",
             description=(
                 f"Match reverted: **{winner_name}** {winner_score}-{loser_score} **{loser_name}**\n"
                 f"Elo Ratings:\n"
@@ -383,14 +428,11 @@ class RevertCog(commands.Cog):
         ctx: commands.Context,
         player1_id: int,
         args: tuple[str, ...],
-        *,
-        elo_multiplier: float = 1.0,
-        title_prefix: str = "",
     ):
         parsed = self._parse_revert_args(player1_id, args)
         if not parsed:
             await ctx.send(embed=discord.Embed(
-                title=title_prefix + "Revert Error",
+                title="Revert Error",
                 description=f"Invalid format or score.\n{self._REVERT_USAGE}\nScore examples: `4-3`, `3:1`, `43`, `4 2`.",
                 color=discord.Color.red(),
             ))
@@ -398,8 +440,6 @@ class RevertCog(commands.Cog):
         winner_id, winner_score, loser_score, loser_id = parsed
         await self._revert_impl(
             ctx, winner_id, winner_score, loser_score, loser_id,
-            elo_multiplier=elo_multiplier,
-            title_prefix=title_prefix,
         )
 
     # ------------------------------------------------------------------
@@ -429,30 +469,60 @@ class RevertCog(commands.Cog):
                 color=discord.Color.red(),
             ))
 
-    @commands.command(
-        name="srevert",
-        help="Revert a previously confirmed seasonal match report (1.5x Elo, admin only). Same args as -revert.",
-    )
-    @commands.check(is_admin)
-    async def srevert(self, ctx: commands.Context, player1_id: int, *args: str):
-        await self._run_revert_command(
-            ctx, player1_id, args, elo_multiplier=1.5, title_prefix="Seasonal "
-        )
+    async def cog_app_command_error(
+        self, interaction: discord.Interaction, error: app_commands.AppCommandError
+    ) -> None:
+        """Slash-command counterpart of revert_error.
 
-    @srevert.error
-    async def srevert_error(self, ctx: commands.Context, error):
-        if isinstance(error, commands.CheckFailure):
-            await ctx.send(embed=discord.Embed(
+        Without this, an app_commands.CheckFailure from is_admin_interaction
+        (used on /revert) is never caught, so the interaction is left
+        unanswered and Discord shows "The application did not respond"
+        instead of a proper permission-denied message.
+        """
+        if isinstance(error, app_commands.CheckFailure):
+            embed = discord.Embed(
                 title="Permission Denied",
                 description="You do not have permission to use this command.",
                 color=discord.Color.red(),
-            ))
-        elif isinstance(error, commands.MissingRequiredArgument):
-            await ctx.send(embed=discord.Embed(
-                title="Seasonal Revert Error",
-                description=f"Missing arguments.\n{self._REVERT_USAGE}",
-                color=discord.Color.red(),
-            ))
+            )
+            if interaction.response.is_done():
+                await interaction.followup.send(embed=embed, ephemeral=True)
+            else:
+                await interaction.response.send_message(embed=embed, ephemeral=True)
+            return
+        raise error
+
+    @app_commands.command(name="revert", description="Revert a previously confirmed match (admin only).")
+    @app_commands.describe(
+        winner_id="Winner's Discord ID",
+        winner_score="Winner's set score (3 or 4)",
+        loser_score="Loser's set score",
+        loser_id="Loser's Discord ID",
+    )
+    @app_commands.guild_only()
+    @app_commands.check(is_admin_interaction)
+    async def slash_revert(
+        self,
+        interaction: discord.Interaction,
+        winner_id: str,
+        winner_score: app_commands.Range[int, 0, 4],
+        loser_score: app_commands.Range[int, 0, 3],
+        loser_id: str,
+    ):
+        try:
+            w_id, l_id = int(winner_id), int(loser_id)
+        except ValueError:
+            await interaction.response.send_message(
+                embed=discord.Embed(
+                    title="Revert Error",
+                    description="Invalid Discord ID format.",
+                    color=discord.Color.red(),
+                ),
+                ephemeral=True,
+            )
+            return
+        ctx = SlashContext(interaction)
+        await self._revert_impl(ctx, w_id, winner_score, loser_score, l_id)
 
 
 # ------------------------------------------------------------------

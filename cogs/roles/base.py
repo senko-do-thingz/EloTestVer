@@ -216,7 +216,7 @@ class RolesBaseCog(commands.Cog):
             row = cursor.fetchone()
 
         if not row:
-            header = f"**Your league:** — *({ctx.author.display_name} is not registered)*"
+            header = f"**Your league:** - *({ctx.author.display_name} is not registered)*"
             footer = (
                 "*Register with `-register <name>` to get a league by Elo after you "
                 "play matches.*"
@@ -225,7 +225,7 @@ class RolesBaseCog(commands.Cog):
 
         elo, gw, gl = int(row[0]), int(row[1]), int(row[2])
         if gw + gl <= 0:
-            header = "**Your league:** — *(no wins or losses yet)*"
+            header = "**Your league:** - *(no wins or losses yet)*"
             footer = (
                 "*Play at least one set (record a win or loss) to be placed into a "
                 "league by Elo.*"
@@ -239,7 +239,7 @@ class RolesBaseCog(commands.Cog):
         ]
         rid = pick_league_role_id_for_elo(effective, elo)
         if rid is None:
-            header = "**Your league:** — *(Elo is outside every configured range)*"
+            header = "**Your league:** - *(Elo is outside every configured range)*"
             footer = (
                 "*Your Elo does not fall into any league bracket yet (or leagues have "
                 "no valid roles on this server).*"

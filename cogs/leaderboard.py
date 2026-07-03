@@ -2,6 +2,7 @@ import io
 from datetime import datetime, timezone
 
 import discord
+from discord import app_commands
 from discord.ext import commands
 
 from db.elo_db import db_connection, db_exists, get_db_path
@@ -11,13 +12,13 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-# Màu viền của Container, tương đương embed.color trước đây
+# Container accent color, equivalent to the old embed.color
 ACCENT_COLOR = discord.Color.blue()
 
 
 def _footer_text(last_updated: datetime | None, note: str | None) -> str:
-    """Dòng 'Last updated' + note, dùng <t:...:R> để Discord tự cập nhật
-    thời gian tương đối (client-side), không cần bot edit lại message."""
+    """Build the 'Last updated' line + note. Uses <t:...:R> so Discord
+    updates the relative time client-side, without the bot re-editing the message."""
     lines = []
     if last_updated:
         lines.append(f"Last updated: <t:{int(last_updated.timestamp())}:R>")
@@ -95,9 +96,9 @@ class LeaderboardRefreshButton(discord.ui.Button):
         await self.custom_view.update_leaderboard(interaction)
 
 
-# Modified: LeaderboardView giờ là LayoutView (Components V2) thay vì View +
-# embed, để có thể đặt nút Refresh làm accessory NẰM TRONG Container (khung
-# viền màu, giống thẻ bài của OwO) thay vì trôi nổi ở một action row riêng.
+# Modified: LeaderboardView is now a LayoutView (Components V2) instead of View +
+# embed, so the Refresh button can be placed as an accessory INSIDE the Container
+# (the colored border, like an OwO card) instead of floating in a separate action row.
 class LeaderboardView(discord.ui.LayoutView):
     def __init__(
         self,
@@ -118,8 +119,8 @@ class LeaderboardView(discord.ui.LayoutView):
         self.last_updated = datetime.now(timezone.utc)
         self.message = None
 
-        # Các item tương tác được tạo 1 lần, giữ nguyên instance qua mỗi lần
-        # render lại layout (chỉ đổi chỗ gắn vào row/container mới).
+        # Interactive items are created once and keep the same instance across
+        # each layout re-render (only their attachment point in the row/container changes).
         self.dropdown = LeaderboardDropdown(self)
         self.prev_button = PreviousPageButton(self)
         self.next_button = NextPageButton(self)
@@ -144,8 +145,8 @@ class LeaderboardView(discord.ui.LayoutView):
         return note_text
 
     def _rebuild_layout(self, filename: str, note: str | None) -> None:
-        """Dựng lại toàn bộ layout: Container (ảnh bảng xếp hạng + Refresh
-        nằm trong khung) + action row dropdown + action row Prev/Next."""
+        """Rebuild the whole layout: Container (leaderboard image + Refresh
+        inside the frame) + dropdown action row + Prev/Next action row."""
         self.clear_items()
 
         container = discord.ui.Container(accent_color=ACCENT_COLOR)
@@ -291,7 +292,7 @@ class LeaderboardView(discord.ui.LayoutView):
         end = start + self.per_page
         page_players = display_players[start:end]
 
-        # Kiểm tra xem user có trong trang này không (để highlight)
+        # Check whether the user is on this page (to highlight them)
         target_in_page = any(pid == self.target_user_id for pid, _, _ in page_players)
 
         self.prev_button.disabled = self.page == 0
@@ -299,10 +300,10 @@ class LeaderboardView(discord.ui.LayoutView):
 
         filename = "leaderboard.png"
 
-        # --- Dùng cache nếu user không nằm trong trang (không cần highlight) ---
+        # --- Use cache if the user isn't on this page (no highlight needed) ---
         use_cache = (
             not target_in_page
-            and self.db_guild_id == self.ctx.guild.id  # không cache cross-server lb
+            and self.db_guild_id == self.ctx.guild.id  # don't cache cross-server lb
         )
 
         if use_cache:
@@ -349,11 +350,14 @@ class LeaderboardCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
 
-    @commands.command(
+    @commands.hybrid_command(
         name="leaderboard",
         aliases=["lb"],
-        help="Show the top 10 players on the leaderboard with sorting options."
+        help="Show the top 10 players on the leaderboard with sorting options.",
+        description="Show the top 10 players on the leaderboard with sorting options.",
+        with_app_command=True,
     )
+    @app_commands.guild_only()
     async def leaderboard(self, ctx: commands.Context):
         view = LeaderboardView(ctx)
         await view.update_leaderboard(ctx)

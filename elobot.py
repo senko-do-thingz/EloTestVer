@@ -23,11 +23,12 @@ bot.remove_command("help")
 _USER_COMMANDS = {
     "register", "register_o", "register_oid",
     "rename", "rename_o", "rename_oid",
-    "report", "rp", "seasonal_report", "srp",
+    "report", "rp",
+    "history",
 }
 _ADMIN_COMMANDS = {
-    "ad_rp", "ad_srp",
-    "revert", "srevert",
+    "ad_rp",
+    "revert",
     "decay", "reset_e",
     "set_e", "set_eid",
     "set_w", "set_wid",
@@ -35,7 +36,7 @@ _ADMIN_COMMANDS = {
     "set_gid", "set_stats",
     "d_reg", "did_reg", "c_reg", "db_d",
     "get_lb", "set_id", "sum_lb",
-    "gimmick", "devmode",
+    "devmode",
     "ladmin", "ledit", "ladd", "lapply", "lclear",
     "lannounce", "lrannounce",
     "set_lan",
@@ -52,7 +53,20 @@ _failed_extensions: list[tuple[str, Exception]] = []
 @bot.event
 async def on_ready():
     print(f"Logged in as {bot.user}")
-    await bot.change_presence(activity=discord.Game(name="-help"))
+    await bot.change_presence(activity=discord.Game(name="-help | /help"))
+
+    try:
+        synced = await bot.tree.sync()
+        print(f"Synced {len(synced)} slash command(s)")
+    except Exception as exc:
+        print(f"Failed to sync slash commands: {exc}")
+        await bot_log(
+            bot,
+            0,
+            "Failed to sync slash commands",
+            level="ERROR",
+            exc=exc,
+        )
 
     await bot_log(
         bot,

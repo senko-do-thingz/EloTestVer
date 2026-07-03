@@ -73,7 +73,7 @@ class PrivateGldCog(commands.Cog, name="PrivateGld"):
         buf.seek(0)
 
         await ctx.send(
-            content=f"Dev Mode — Leaderboard data from Server {server_id}",
+            content=f"Dev Mode - Leaderboard data from Server {server_id}",
             file=discord.File(buf, filename=f"leaderboard_{server_id}.zip"),
         )
 

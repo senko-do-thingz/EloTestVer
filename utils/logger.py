@@ -10,7 +10,7 @@ Usage::
     from utils.logger import bot_log
 
     await bot_log(bot, guild_id, "Player registered", level="INFO",
-                  fields={"name": "Alice", "elo": 500})
+                  fields={"name": "Senko", "elo": 500})
 """
 
 import datetime

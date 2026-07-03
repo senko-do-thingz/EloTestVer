@@ -3,15 +3,16 @@ import logging
 import time
 
 import discord
+from discord import app_commands
 from discord.ext import commands
 
 from db.elo_db import db_connection
-from utils import is_valid_name, is_admin, update_lb_name, sync_against_names
+from utils import is_valid_name, is_admin, update_lb_name, sync_against_names, NAME_RULE_TEXT
 from config import YES_EMOJI, NO_EMOJI
 
 logger = logging.getLogger(__name__)
 
-_NAME_RULE = "Name must be 2-25 characters and only contain English letters, accented letters (e.g. à, ü), Chinese/Japanese/Korean characters, numbers, '.' and '_'."
+_NAME_RULE = NAME_RULE_TEXT
 _RENAME_COOLDOWN_SECONDS = 7 * 24 * 3600
 
 
@@ -28,7 +29,13 @@ class RegistrationCog(commands.Cog):
     # Register
     # ------------------------------------------------------------------
 
-    @commands.command(help="Register with a custom name and initial Elo of 500.")
+    @commands.hybrid_command(
+        name="register",
+        description="Register with a custom name and initial Elo of 500.",
+        with_app_command=True,
+    )
+    @app_commands.describe(name="Your registered display name")
+    @app_commands.guild_only()
     async def register(self, ctx: commands.Context, name: str = None):
         if name is None:
             prompt = await ctx.send(embed=discord.Embed(
@@ -100,7 +107,10 @@ class RegistrationCog(commands.Cog):
             color=discord.Color.green(),
         ))
 
-    @commands.command(help="Register another player with a custom name and initial Elo of 500 (admin only).")
+    @commands.command(
+        name="register_o",
+        help="Register another player (admin only).",
+    )
     @commands.check(is_admin)
     async def register_o(self, ctx: commands.Context, member: discord.Member, name: str = None):
         if name is None:
@@ -154,7 +164,10 @@ class RegistrationCog(commands.Cog):
                 color=discord.Color.red(),
             ))
 
-    @commands.command(help="Register another player using their Discord ID with a custom name (admin only).")
+    @commands.command(
+        name="register_oid",
+        help="Register a player by Discord ID (admin only).",
+    )
     @commands.check(is_admin)
     async def register_oid(self, ctx: commands.Context, discord_id: str, name: str = None):
         if name is None:
@@ -254,8 +267,8 @@ class RegistrationCog(commands.Cog):
         last_rename: int = 0,
     ) -> None:
         """
-        Gửi confirmation embed, chờ reaction, rồi thực hiện rename.
-        Dùng chung cho -rename, -rename_o, -rename_oid.
+        Send a confirmation embed, wait for reaction, then perform the rename.
+        Shared by -rename, -rename_o, -rename_oid.
         """
         is_admin_user = skip_cooldown
         now = int(time.time())
@@ -334,7 +347,13 @@ class RegistrationCog(commands.Cog):
     # Rename commands
     # ------------------------------------------------------------------
 
-    @commands.command(help="Change your name (7-day cooldown).")
+    @commands.hybrid_command(
+        name="rename",
+        description="Change your registered name (7-day cooldown).",
+        with_app_command=True,
+    )
+    @app_commands.describe(new_name="Your new registered display name")
+    @app_commands.guild_only()
     async def rename(self, ctx: commands.Context, new_name: str = None):
         if new_name is None:
             await ctx.send(embed=discord.Embed(
@@ -388,7 +407,10 @@ class RegistrationCog(commands.Cog):
             last_rename=last_rename,
         )
 
-    @commands.command(help="Admin: Change another player's name (no cooldown).")
+    @commands.command(
+        name="rename_o",
+        help="Rename another player (admin only, no cooldown).",
+    )
     @commands.check(is_admin)
     async def rename_o(self, ctx: commands.Context, member: discord.Member, new_name: str = None):
         if new_name is None:
@@ -447,7 +469,10 @@ class RegistrationCog(commands.Cog):
                 color=discord.Color.red(),
             ))
 
-    @commands.command(help="Admin: Change another player's name by Discord ID (no cooldown).")
+    @commands.command(
+        name="rename_oid",
+        help="Rename a player by Discord ID (admin only, no cooldown).",
+    )
     @commands.check(is_admin)
     async def rename_oid(self, ctx: commands.Context, discord_id: str, new_name: str = None):
         if new_name is None:

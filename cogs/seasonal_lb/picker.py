@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import discord
+from discord import app_commands
 from discord.ext import commands
 
 import os
@@ -16,9 +17,13 @@ from .base import SeasonalLBBaseCog
 class SeasonalLBPickerCog(SeasonalLBBaseCog):
     """Commands: lbs, lbs_id."""
 
-    @commands.command(
-        help="Show leaderboard categories and rankings based on selected season and month."
+    @commands.hybrid_command(
+        name="lbs",
+        help="Show leaderboard categories and rankings based on selected season and month.",
+        description="Show leaderboard categories and rankings based on selected season and month.",
+        with_app_command=True,
     )
+    @app_commands.guild_only()
     async def lbs(self, ctx: commands.Context) -> None:
         await self._open_lbs_picker(ctx, ctx.guild.id)
 

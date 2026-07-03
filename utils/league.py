@@ -84,7 +84,7 @@ def format_league_stat_line(
     ]
     role_id = pick_league_role_id_for_elo(effective, int(elo))
     if role_id is None:
-        return f"{first_place} League: —"
+        return f"{first_place} League: -"
 
     cursor.execute("SELECT id, elo, games_won, games_lost FROM players")
     rows = cursor.fetchall()
@@ -134,13 +134,12 @@ def _persist_league_announce_channel_ids(guild_id: int, ids: list[int]) -> None:
         cursor.execute(
             """
             INSERT INTO settings (
-                guild_id, language, seasonal_report_enabled, dev_mode,
+                guild_id, language, dev_mode,
                 league_announce_channel_ids
             )
             VALUES (
                 ?,
                 COALESCE((SELECT language FROM settings WHERE guild_id=?), 'en'),
-                COALESCE((SELECT seasonal_report_enabled FROM settings WHERE guild_id=?), 0),
                 COALESCE((SELECT dev_mode FROM settings WHERE guild_id=?), 0),
                 ?
             )
@@ -148,7 +147,7 @@ def _persist_league_announce_channel_ids(guild_id: int, ids: list[int]) -> None:
                 league_announce_channel_ids = excluded.league_announce_channel_ids,
                 league_announce_channel_id = NULL
             """,
-            (guild_id, guild_id, guild_id, guild_id, payload),
+            (guild_id, guild_id, guild_id, payload),
         )
         conn.commit()
 

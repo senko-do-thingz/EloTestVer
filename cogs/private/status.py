@@ -1,73 +1,73 @@
-import time
+import platform
+from datetime import datetime, timezone
 
 import discord
 from discord.ext import commands
 
-from db.elo_db import get_dev_mode
-from utils.logger import bot_log, PRIVATE_GUILD_ID
+from utils.logger import bot_log
+from utils.private_guard import is_private_allowed, send_not_available
 
 
 class PrivateStatusCog(commands.Cog, name="PrivateStatus"):
+    """Private diagnostics command showing internal bot/process status.
+
+    NOTE: this file used to be an exact copy-paste of gld.py (same class
+    name "PrivateGldCog", same cog name "PrivateGld"), which made
+    `bot.add_cog()` raise "Cog named 'PrivateGld' already loaded" whenever
+    both extensions were loaded, crashing this extension on every startup.
+    It has been rewritten as its own distinct command.
+    """
+
     def __init__(self, bot: commands.Bot):
         self.bot = bot
 
-    @commands.command(name="status", hidden=True, help="Show bot status: ping, servers, devmode (private only).")
+    @commands.command(name="status", hidden=True)
     async def status(self, ctx: commands.Context):
-        """Print full bot status — ping, all servers the bot is in, and devmode state per server."""
-        if ctx.guild is None or ctx.guild.id != PRIVATE_GUILD_ID:
-            await ctx.send(
-                embed=discord.Embed(
-                    title="Not Available",
-                    description="This command is only available in the private server.",
-                    color=discord.Color.red(),
-                )
-            )
+        """Show internal bot/process status (private guild only)."""
+        if not is_private_allowed(ctx.guild):
+            await send_not_available(ctx)
             return
 
-        # Measure round-trip latency
-        start = time.perf_counter()
-        msg = await ctx.send("…")
-        ping_ms = (time.perf_counter() - start) * 1000
-        ws_ms = self.bot.latency * 1000
+        latency_ms = round(self.bot.latency * 1000) if self.bot.latency else 0
+        current_time = datetime.now(timezone.utc).strftime("%d %b %Y, %H:%M:%S UTC")
 
-        guilds = sorted(self.bot.guilds, key=lambda g: g.name.lower())
+        loaded_extensions = sorted(self.bot.extensions.keys())
+        loaded_cogs = sorted(self.bot.cogs.keys())
 
-        # Build server list with devmode indicator
-        lines: list[str] = []
-        for g in guilds:
-            try:
-                dev = get_dev_mode(g.id)
-            except Exception:
-                dev = False
-            dev_tag = " 🔧" if dev else ""
-            lines.append(f"`{g.id}` **{g.name}**{dev_tag} — {g.member_count} members")
-
-        server_block = "\n".join(lines) if lines else "*(no servers)*"
+        prefix_command_names = {cmd.qualified_name for cmd in self.bot.commands}
+        tree_command_names = {cmd.qualified_name for cmd in self.bot.tree.get_commands()}
+        command_count = len(prefix_command_names | tree_command_names)
 
         embed = discord.Embed(
             title="Bot Status",
-            color=discord.Color.green(),
+            color=discord.Color.blue(),
         )
-        embed.add_field(name="WebSocket latency", value=f"{ws_ms:.1f} ms", inline=True)
-        embed.add_field(name="Round-trip ping", value=f"{ping_ms:.1f} ms", inline=True)
-        embed.add_field(name="Servers", value=str(len(guilds)), inline=True)
+        embed.add_field(name="Servers", value=str(len(self.bot.guilds)), inline=True)
+        embed.add_field(name="Latency", value=f"{latency_ms} ms", inline=True)
+        embed.add_field(name="Commands", value=str(command_count), inline=True)
+        embed.add_field(name="Extensions Loaded", value=str(len(loaded_extensions)), inline=True)
+        embed.add_field(name="Cogs Loaded", value=str(len(loaded_cogs)), inline=True)
         embed.add_field(
-            name="Server list  (🔧 = devmode on)",
-            value=server_block[:1024],  # embed field limit
+            name="Python / discord.py",
+            value=f"{platform.python_version()} / {discord.__version__}",
+            inline=True,
+        )
+        embed.add_field(name="Bot Time (UTC)", value=current_time, inline=False)
+        embed.add_field(
+            name="Loaded Extensions",
+            value="\n".join(f"`{ext}`" for ext in loaded_extensions) or "None",
             inline=False,
         )
 
-        await msg.edit(content=None, embed=embed)
+        await ctx.send(embed=embed)
 
         await bot_log(
             ctx.bot,
-            ctx.guild.id if ctx.guild else 0,
+            ctx.guild.id,
             "Command used: -status",
             level="INFO",
             fields={
                 "User": f"{ctx.author.mention} ({ctx.author.id})",
-                "WS latency": f"{ws_ms:.1f} ms",
-                "Servers": str(len(guilds)),
             },
         )
 
