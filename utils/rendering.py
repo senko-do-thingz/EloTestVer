@@ -554,7 +554,10 @@ def render_compare_image(
     pad_bottom = 14 * SCALE
     width_px = width * SCALE
 
-    label_w = 190 * SCALE
+    # Modified: reduced from 190 to bring the two value columns (and the
+    # player-name headers above them) closer to the horizontal center,
+    # instead of sitting visibly right of the centered title above them.
+    label_w = 160 * SCALE
     value_col_w = (width_px - pad_x * 2 - label_w) // 2
 
     top_h = title_h + header_h

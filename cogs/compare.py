@@ -41,14 +41,17 @@ class CompareView(discord.ui.LayoutView):
         ctx: commands.Context,
         user_id1: int,
         user_id2: int,
-        mention_line: str,
+        mention1: str,
+        mention2: str,
     ):
         super().__init__(timeout=3600.0)
         self.cog = cog
         self.ctx = ctx
         self.user_id1 = user_id1
         self.user_id2 = user_id2
-        self.mention_line = mention_line
+        self.mention1 = mention1
+        self.mention2 = mention2
+        self.mention_line = ""
         self.last_updated = datetime.now(timezone.utc)
         self.message = None
         self.refresh_button = CompareRefreshButton(self)
@@ -127,6 +130,15 @@ class CompareView(discord.ui.LayoutView):
             winner_text=data["winner_text"],
         )
         file = discord.File(buf, filename=filename)
+
+        # Modified: rebuild the "Name (@mention)" header from the just-fetched
+        # names each time, instead of reusing the mention_line captured at the
+        # initial /compare call. Otherwise a rename between the initial call
+        # and a refresh would update the image but leave the header stale.
+        part1 = f"{data['name1']} ({self.mention1})" if self.mention1 else data["name1"]
+        part2 = f"{data['name2']} ({self.mention2})" if self.mention2 else data["name2"]
+        self.mention_line = f"{part1} vs {part2}"
+
         self._rebuild_layout(filename)
         await self._send_or_edit(interaction_or_ctx, file)
 
@@ -474,7 +486,9 @@ class Compare(commands.Cog):
             )
             return
 
-        # build "Name (@mention)" for each player and join with " vs "
+        # fetch raw @mention text for each player (used to build the
+        # "Name (@mention)" header inside CompareView, rebuilt fresh on
+        # every refresh so renames stay in sync)
         mention1 = (
             await self._safe_fetch_mention(user1.id if user1 is not None else user_id1)
             if (user1 or user_id1)
@@ -485,14 +499,14 @@ class Compare(commands.Cog):
             if (user2 or user_id2)
             else ""
         )
-        part1 = f"{name1} ({mention1})" if mention1 else name1
-        part2 = f"{name2} ({mention2})" if mention2 else name2
-        mention_line = f"{part1} vs {part2}"
 
         # Modified: comparison result is now rendered as an image (like the
         # -history command) inside a Components V2 Container, with a Refresh
         # button + "Last updated" line below it (same pattern as -leaderboard).
-        view = CompareView(self, ctx, user_id1, user_id2, mention_line)
+        # mention1/mention2 (not a pre-built mention_line) are passed in so
+        # the "Name (@mention)" header can be rebuilt with fresh names on
+        # every refresh, not just at the initial call.
+        view = CompareView(self, ctx, user_id1, user_id2, mention1, mention2)
         await view.update_compare(ctx)
 
 
