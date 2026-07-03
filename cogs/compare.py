@@ -238,8 +238,8 @@ class Compare(commands.Cog):
         with_app_command=True,
     )
     @app_commands.describe(
-        player1="First player (@mention, ID, or registered name)",
-        player2="Second player (@mention, ID, or registered name)",
+        player1="First player (registered name)",
+        player2="Second player (registered name)",
     )
     @app_commands.autocomplete(player1=registered_name_autocomplete, player2=registered_name_autocomplete)
     @app_commands.guild_only()
