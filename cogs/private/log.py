@@ -21,8 +21,8 @@ class PrivateLogCog(commands.Cog, name="PrivateLog"):
     ):
         """
         Usage:
-          -log <channel>   — set the log channel (ID, #channel, or name)
-          -log off         — clear / disable the log channel
+          -log <channel>   - set the log channel (ID, #channel, or name)
+          -log off         - clear / disable the log channel
         """
         if ctx.guild is None or ctx.guild.id != PRIVATE_GUILD_ID:
             await ctx.send(

@@ -7,12 +7,13 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
-from db.elo_db import db_connection, get_dev_mode
+from db.elo_db import db_connection, get_dev_mode, apply_win_streak
 from db.h2h_db import add_h2h_match
 from db.match_history_db import (
     add_match_history_row,
     increment_player_matches,
     next_match_id,
+    trim_match_history,
 )
 from utils import calculate_elo, is_admin, is_admin_interaction, sync_league_roles
 from utils.lb_cache import invalidate as lb_cache_invalidate, schedule_rebuild as lb_cache_rebuild
@@ -483,6 +484,10 @@ class ReportingCog(commands.Cog):
                 )
                 increment_player_matches(cursor, winner.id)
                 increment_player_matches(cursor, loser.id)
+                apply_win_streak(cursor, winner.id, won=True)
+                apply_win_streak(cursor, loser.id, won=False)
+                trim_match_history(cursor, winner.id)
+                trim_match_history(cursor, loser.id)
                 conn.commit()
             # Connection closed - sync_league_roles can open the DB freely
 
@@ -747,6 +752,10 @@ class ReportingCog(commands.Cog):
                 )
                 increment_player_matches(cursor, winner.id)
                 increment_player_matches(cursor, loser.id)
+                apply_win_streak(cursor, winner.id, won=True)
+                apply_win_streak(cursor, loser.id, won=False)
+                trim_match_history(cursor, winner.id)
+                trim_match_history(cursor, loser.id)
                 conn.commit()
 
             lb_cache_invalidate(ctx.guild.id)
@@ -915,8 +924,8 @@ class ReportingCog(commands.Cog):
     @app_commands.command(name="ad_rp", description="Report a match using Discord IDs (admin only).")
     @app_commands.describe(
         player1_id="First player's Discord ID",
-        winner_score="Winner's set score (3 or 4)",
-        loser_score="Loser's set score",
+        p1_score="First player's set score (0-4)",
+        p2_score="Second player's set score (0-3)",
         player2_id="Second player's Discord ID",
     )
     @app_commands.guild_only()
@@ -925,8 +934,8 @@ class ReportingCog(commands.Cog):
         self,
         interaction: discord.Interaction,
         player1_id: str,
-        winner_score: app_commands.Range[int, 0, 4],
-        loser_score: app_commands.Range[int, 0, 3],
+        p1_score: app_commands.Range[int, 0, 4],
+        p2_score: app_commands.Range[int, 0, 3],
         player2_id: str,
     ):
         try:
@@ -942,7 +951,7 @@ class ReportingCog(commands.Cog):
             )
             return
         ctx = SlashContext(interaction)
-        await self._ad_rp_impl(ctx, p1_id, winner_score, loser_score, p2_id)
+        await self._ad_rp_impl(ctx, p1_id, p1_score, p2_score, p2_id)
 
 
 async def setup(bot: commands.Bot):

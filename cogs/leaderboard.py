@@ -319,7 +319,7 @@ class LeaderboardView(discord.ui.LayoutView):
                 return
             else:
                 logger.debug(
-                    "LB serve  MISS guild=%s category=%s page=%d user=%s — rendering fresh",
+                    "LB serve  MISS guild=%s category=%s page=%d user=%s - rendering fresh",
                     self.db_guild_id, self.category, self.page, self.target_user_id,
                 )
         else:

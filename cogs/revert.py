@@ -30,8 +30,10 @@ class RevertCog(commands.Cog):
     BO7_FIXED_BONUS = 2
 
     _REVERT_USAGE = (
-        "- `-revert <winner_id> <score1> <score2> <loser_id>`\n"
-        "- `-revert <winner_id> <score> <loser_id>` (score: `4-3`, `3:1`, `43`, `4 2`)"
+        "- `-revert <player1_id> <p1_score> <p2_score> <player2_id>`\n"
+        "- `-revert <player1_id> <score> <player2_id>` (score: `4-3`, `3:1`, `43`, `4 2`)\n"
+        "Use the exact same IDs, scores, and order as the original `-report`/`-ad_rp` "
+        "that you want to undo."
     )
 
     def __init__(self, bot: commands.Bot):
@@ -448,7 +450,7 @@ class RevertCog(commands.Cog):
 
     @commands.command(
         name="revert",
-        help="Revert a previously confirmed match report (admin only). Usage: -revert <winner_id> <score1> <score2> <loser_id>",
+        help="Revert a previously confirmed match report (admin only). Usage: -revert <player1_id> <p1_score> <p2_score> <player2_id>",
     )
     @commands.check(is_admin)
     async def revert(self, ctx: commands.Context, player1_id: int, *args: str):
@@ -494,23 +496,23 @@ class RevertCog(commands.Cog):
 
     @app_commands.command(name="revert", description="Revert a previously confirmed match (admin only).")
     @app_commands.describe(
-        winner_id="Winner's Discord ID",
-        winner_score="Winner's set score (3 or 4)",
-        loser_score="Loser's set score",
-        loser_id="Loser's Discord ID",
+        player1_id="First player's Discord ID (same as used in the original report)",
+        p1_score="First player's set score from the original report (0-4)",
+        p2_score="Second player's set score from the original report (0-3)",
+        player2_id="Second player's Discord ID (same as used in the original report)",
     )
     @app_commands.guild_only()
     @app_commands.check(is_admin_interaction)
     async def slash_revert(
         self,
         interaction: discord.Interaction,
-        winner_id: str,
-        winner_score: app_commands.Range[int, 0, 4],
-        loser_score: app_commands.Range[int, 0, 3],
-        loser_id: str,
+        player1_id: str,
+        p1_score: app_commands.Range[int, 0, 4],
+        p2_score: app_commands.Range[int, 0, 3],
+        player2_id: str,
     ):
         try:
-            w_id, l_id = int(winner_id), int(loser_id)
+            p1_id, p2_id = int(player1_id), int(player2_id)
         except ValueError:
             await interaction.response.send_message(
                 embed=discord.Embed(
@@ -522,7 +524,7 @@ class RevertCog(commands.Cog):
             )
             return
         ctx = SlashContext(interaction)
-        await self._revert_impl(ctx, w_id, winner_score, loser_score, l_id)
+        await self._revert_impl(ctx, p1_id, p1_score, p2_score, p2_id)
 
 
 # ------------------------------------------------------------------

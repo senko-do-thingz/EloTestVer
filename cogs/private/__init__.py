@@ -1,1 +1,1 @@
-# Intentionally empty — marks this directory as a package for private cogs.
+# Intentionally empty - marks this directory as a package for private cogs.

@@ -127,7 +127,9 @@ def _run_migrations(conn: sqlite3.Connection, cursor: sqlite3.Cursor) -> None:
             games_played_this_month INTEGER DEFAULT 0,
             matches INTEGER DEFAULT 0,
             last_rename INTEGER DEFAULT 0,
-            against TEXT DEFAULT ''
+            against TEXT DEFAULT '',
+            win_streak INTEGER DEFAULT 0,
+            highest_win_streak INTEGER DEFAULT 0
         )
         """
     )
@@ -174,6 +176,8 @@ def _run_migrations(conn: sqlite3.Connection, cursor: sqlite3.Cursor) -> None:
     _safe_alter(cursor, "ALTER TABLE settings ADD COLUMN league_announce_channel_id INTEGER DEFAULT NULL")
     _safe_alter(cursor, "ALTER TABLE settings ADD COLUMN league_announce_channel_ids TEXT DEFAULT NULL")
     _safe_alter(cursor, "ALTER TABLE settings ADD COLUMN log_channel_id INTEGER DEFAULT NULL")
+    _safe_alter(cursor, "ALTER TABLE players ADD COLUMN win_streak INTEGER DEFAULT 0")
+    _safe_alter(cursor, "ALTER TABLE players ADD COLUMN highest_win_streak INTEGER DEFAULT 0")
 
     conn.commit()
 
@@ -219,6 +223,53 @@ def set_dev_mode(guild_id: int, enabled: bool) -> None:
             (guild_id, guild_id, 1 if enabled else 0),
         )
         conn.commit()
+
+
+# ---------------------------------------------------------------------------
+# Win streak helpers
+#
+# Win streak is a display-only stat: it never affects Elo math. A player's
+# current streak increments on every match win and resets to 0 on a loss.
+# The highest streak they have ever reached is kept separately so it can be
+# shown even after the current streak resets.
+# ---------------------------------------------------------------------------
+
+def apply_win_streak(cursor, player_id: str | int, won: bool) -> tuple[int, int]:
+    """Update a player's current/highest win streak after a match result.
+
+    Returns the (win_streak, highest_win_streak) tuple after the update.
+    """
+    cursor.execute(
+        "SELECT win_streak, highest_win_streak FROM players WHERE id=?",
+        (str(player_id),),
+    )
+    row = cursor.fetchone()
+    current = row[0] if row and row[0] is not None else 0
+    highest = row[1] if row and row[1] is not None else 0
+
+    if won:
+        current += 1
+        highest = max(highest, current)
+    else:
+        current = 0
+
+    cursor.execute(
+        "UPDATE players SET win_streak=?, highest_win_streak=? WHERE id=?",
+        (current, highest, str(player_id)),
+    )
+    return current, highest
+
+
+def get_win_streak(cursor, player_id: str | int) -> tuple[int, int]:
+    """Return (win_streak, highest_win_streak) for a player, defaulting to (0, 0)."""
+    cursor.execute(
+        "SELECT win_streak, highest_win_streak FROM players WHERE id=?",
+        (str(player_id),),
+    )
+    row = cursor.fetchone()
+    if not row:
+        return 0, 0
+    return (row[0] or 0), (row[1] or 0)
 
 
 def get_log_channel_id(guild_id: int) -> int | None:

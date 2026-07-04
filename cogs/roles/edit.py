@@ -367,7 +367,7 @@ class RolesEditCog(RolesBaseCog):
                 )
                 conn.commit()
 
-        # Case 1: lowest league — edit its max_elo
+        # Case 1: lowest league - edit its max_elo
         if sel_i == 0:
             next_row = leagues_sorted[1]
             n_name, n_min, n_max, n_min_kind, n_max_kind, n_role_id, n_disc = next_row
@@ -424,7 +424,7 @@ class RolesEditCog(RolesBaseCog):
                 )
             )
 
-        # Case 2: highest league — edit its min_elo
+        # Case 2: highest league - edit its min_elo
         elif sel_i == len(leagues_sorted) - 1:
             prev_row = leagues_sorted[-2]
             p_name, p_min, p_max, p_min_kind, p_max_kind, p_role_id, p_disc = prev_row
@@ -481,7 +481,7 @@ class RolesEditCog(RolesBaseCog):
                 )
             )
 
-        # Case 3: middle league — ask what to edit
+        # Case 3: middle league - ask what to edit
         else:
             await self._ledit_middle(
                 ctx, leagues_sorted, sel_i, role_by_id, cancel_event, _update_pair

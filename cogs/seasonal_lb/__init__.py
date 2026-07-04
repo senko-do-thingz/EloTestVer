@@ -1,5 +1,5 @@
 """
-cogs/seasonal_lb — seasonal leaderboard browser.
+cogs/seasonal_lb - seasonal leaderboard browser.
 
 Sub-modules
 -----------

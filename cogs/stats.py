@@ -110,7 +110,7 @@ class StatsCog(commands.Cog):
                 accent_color=discord.Color.red(),
             )
 
-        _uid, name, games_won, games_lost, elo, games_played_this_month = row[0]
+        _uid, name, games_won, games_lost, elo, games_played_this_month, win_streak = row[0]
         player_id = str(user_id)
         total_games = games_won + games_lost
         win_rate = (games_won / total_games) * 100 if total_games > 0 else 0
@@ -156,7 +156,7 @@ class StatsCog(commands.Cog):
             f"🏆 Games Won: {games_won}\n"
             f"💀 Games Lost: {games_lost}\n"
             f"🎮 Monthly Games Played: {games_played_this_month}\n"
-            f"📊 Win Rate: {win_rate:.2f}%\n"
+            f"📊 Win Rate: {win_rate:.2f}% (Win Streak: {win_streak})\n"
             f"{tail}"
         )
 
@@ -269,7 +269,7 @@ class StatsCog(commands.Cog):
         Provide exactly one of *user_id* or *search_name*.
 
         Always returns a ``list[tuple]`` where each tuple is
-        ``(id, name, games_won, games_lost, elo, games_played_this_month)``:
+        ``(id, name, games_won, games_lost, elo, games_played_this_month, win_streak)``:
         - Empty list  → no match found
         - 1-item list → exact match (or single partial match)
         - N-item list → multiple partial matches (callers show disambiguation)
@@ -279,7 +279,7 @@ class StatsCog(commands.Cog):
         """
         if user_id is not None:
             cursor.execute(
-                "SELECT id, name, games_won, games_lost, elo, games_played_this_month"
+                "SELECT id, name, games_won, games_lost, elo, games_played_this_month, win_streak"
                 " FROM players WHERE id = ?",
                 (user_id,),
             )
@@ -288,7 +288,7 @@ class StatsCog(commands.Cog):
 
         if search_name is not None:
             cursor.execute(
-                "SELECT id, name, games_won, games_lost, elo, games_played_this_month"
+                "SELECT id, name, games_won, games_lost, elo, games_played_this_month, win_streak"
                 " FROM players WHERE name LIKE ?",
                 (f"%{search_name}%",),
             )

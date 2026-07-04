@@ -7,6 +7,12 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 
 
+# A player's match_history rows are capped at this many. Once a player would
+# have a 31st stored row, the oldest one is evicted (FIFO) - see
+# trim_match_history() below, called right after each new row is added.
+MAX_HISTORY_PER_PLAYER = 30
+
+
 @dataclass(frozen=True)
 class MatchHistoryRow:
     match_id: int
@@ -98,7 +104,7 @@ def decrement_player_matches(cursor: sqlite3.Cursor, player_id: str | int) -> No
 
 
 def get_recent_match_history(
-    cursor: sqlite3.Cursor, player_id: str | int, limit: int
+    cursor: sqlite3.Cursor, player_id: str | int, limit: int, offset: int = 0
 ) -> list[MatchHistoryRow]:
     cursor.execute(
         """
@@ -107,9 +113,9 @@ def get_recent_match_history(
         FROM match_history
         WHERE player_id=?
         ORDER BY played_at DESC, match_id DESC
-        LIMIT ?
+        LIMIT ? OFFSET ?
         """,
-        (str(player_id), limit),
+        (str(player_id), limit, offset),
     )
     return [
         MatchHistoryRow(
@@ -124,6 +130,43 @@ def get_recent_match_history(
         )
         for row in cursor.fetchall()
     ]
+
+
+def count_player_match_history(cursor: sqlite3.Cursor, player_id: str | int) -> int:
+    """Number of match_history rows actually stored for this player (capped
+    at MAX_HISTORY_PER_PLAYER by trim_match_history)."""
+    cursor.execute(
+        "SELECT COUNT(*) FROM match_history WHERE player_id=?",
+        (str(player_id),),
+    )
+    row = cursor.fetchone()
+    return int(row[0]) if row else 0
+
+
+def trim_match_history(
+    cursor: sqlite3.Cursor,
+    player_id: str | int,
+    keep: int = MAX_HISTORY_PER_PLAYER,
+) -> None:
+    """Keep only the ``keep`` most recent match_history rows for a player.
+
+    Once a player would have more than ``keep`` rows stored (e.g. a 31st
+    match), the oldest rows beyond the limit are deleted - equivalent to
+    evicting match #1 and shifting #2 -> #1, #3 -> #2, ... since rows are
+    always read back ordered by recency.
+    """
+    cursor.execute(
+        """
+        DELETE FROM match_history
+        WHERE player_id=? AND match_id NOT IN (
+            SELECT match_id FROM match_history
+            WHERE player_id=?
+            ORDER BY played_at DESC, match_id DESC
+            LIMIT ?
+        )
+        """,
+        (str(player_id), str(player_id), keep),
+    )
 
 
 def find_latest_match_id_for_revert(

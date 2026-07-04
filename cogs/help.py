@@ -7,16 +7,29 @@ from discord.ext import commands
 from utils.autocomplete import command_name_autocomplete
 from utils.command_registry import (
     CommandHelp,
+    admin_command_names,
     lookup_command_help,
     public_command_names,
 )
+from utils.guards import is_admin
 from utils.logger import PRIVATE_GUILD_ID
 
 
 async def help_command_autocomplete(
     interaction: discord.Interaction, current: str
 ) -> list[app_commands.Choice[str]]:
+    # Admin-only commands are intentionally excluded from /help suggestions.
+    # They live under /adhelp instead, so a regular member browsing /help
+    # never sees admin-only command names (revert, set_e, set_stats, etc.)
+    # as autocomplete options.
     names = public_command_names()
+    return await command_name_autocomplete(interaction, current, names=names)
+
+
+async def adhelp_command_autocomplete(
+    interaction: discord.Interaction, current: str
+) -> list[app_commands.Choice[str]]:
+    names = admin_command_names()
     return await command_name_autocomplete(interaction, current, names=names)
 
 
@@ -30,8 +43,8 @@ def _general_commands_list(guild_id: int) -> list[tuple[str, str]]:
             "Report a match result.",
         ),
         (
-            "-history <count> / /history",
-            "Show recent match history (Date | Opponent | Wins | Loses | +/- | INIT | FINAL).",
+            "-history [@player] / /history",
+            "Show recent match history as a paginated image (10/page, up to 30 stored); mention a player to view theirs.",
         ),
     ]
     commands_list.extend(
@@ -131,6 +144,40 @@ class HelpCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
 
+    async def cog_command_error(self, ctx: commands.Context, error: Exception) -> None:
+        if isinstance(error, commands.CheckFailure):
+            await ctx.send(
+                embed=discord.Embed(
+                    title="Permission Denied",
+                    description="You do not have permission to use this admin command.",
+                    color=discord.Color.red(),
+                )
+            )
+            return
+        raise error
+
+    async def cog_app_command_error(
+        self, interaction: discord.Interaction, error: app_commands.AppCommandError
+    ) -> None:
+        """Slash-command counterpart of cog_command_error.
+
+        Without this, an app_commands.CheckFailure (e.g. is_admin rejecting
+        a non-admin user on /adhelp) is never caught, so the interaction is
+        left unanswered instead of showing a proper permission-denied message.
+        """
+        if isinstance(error, app_commands.CheckFailure):
+            embed = discord.Embed(
+                title="Permission Denied",
+                description="You do not have permission to use this admin command.",
+                color=discord.Color.red(),
+            )
+            if interaction.response.is_done():
+                await interaction.followup.send(embed=embed, ephemeral=True)
+            else:
+                await interaction.response.send_message(embed=embed, ephemeral=True)
+            return
+        raise error
+
     async def _help_impl(self, ctx: commands.Context, command: str | None = None) -> None:
         if command:
             entry = lookup_command_help(command)
@@ -205,11 +252,32 @@ class HelpCog(commands.Cog):
 
     @commands.hybrid_command(
         name="adhelp",
-        help="Show admin-only commands.",
-        description="Show admin-only commands.",
+        help="Show admin-only commands, or detailed help for one admin command (admin only).",
+        description="Show admin-only commands, or detailed help for one admin command (admin only).",
         with_app_command=True,
     )
-    async def adhelp(self, ctx: commands.Context):
+    @app_commands.describe(command="Admin command name for detailed help (optional)")
+    @app_commands.autocomplete(command=adhelp_command_autocomplete)
+    @app_commands.guild_only()
+    @commands.check(is_admin)
+    async def adhelp(self, ctx: commands.Context, command: str | None = None):
+        if command:
+            entry = lookup_command_help(command)
+            if entry is None:
+                await ctx.send(
+                    embed=discord.Embed(
+                        title="Command Not Found",
+                        description=(
+                            f"No help entry for `{command}`.\n"
+                            "Use `-adhelp` without arguments to see all admin commands."
+                        ),
+                        color=discord.Color.red(),
+                    )
+                )
+                return
+            await ctx.send(embed=build_command_detail_embed(entry))
+            return
+
         stats_commands = [
             (
                 "-decay",
@@ -238,7 +306,7 @@ class HelpCog(commands.Cog):
                 "Set the **loss count** of a specific player using their Discord ID.",
             ),
             (
-                "-set_gid <discord_id> <games_played> / /set_g",
+                "-set_gid <discord_id> <games_played>",
                 "Set the **monthly games played** for a player using their Discord ID.",
             ),
             (
@@ -251,25 +319,27 @@ class HelpCog(commands.Cog):
             ),
             (
                 "-revert / /revert",
-                "Revert a previously confirmed match report.",
+                "Undo a previously confirmed match report. Use the same player1_id, "
+                "p1_score, p2_score, player2_id (same order) as the original /report "
+                "to reverse it. Use `-help revert` for details.",
             ),
         ]
         admin_commands = {
             "register": [
                 (
-                    "-register_o / /register_o",
+                    "-register_o",
                     "Register another player with a custom name.",
                 ),
                 (
-                    "-register_oid / /register_oid",
+                    "-register_oid",
                     "Register another player using their Discord ID with a custom name.",
                 ),
                 (
-                    "-rename_o / /rename_o",
+                    "-rename_o",
                     "Rename another player (no cooldown).",
                 ),
                 (
-                    "-rename_oid / /rename_oid",
+                    "-rename_oid",
                     "Rename another player by Discord ID (no cooldown).",
                 ),
                 ("-d_reg <@player>", "Delete a player's registration."),

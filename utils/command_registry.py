@@ -117,10 +117,13 @@ _register_many(
     ),
     _cmd(
         "history",
-        description="Show your recent match history in a table.",
-        syntax="-history <count>",
-        slash_syntax="/history count:<number>",
-        examples=("-history 10", "/history count:5"),
+        description=(
+            "Show your recent match history in a paginated image (10 matches per "
+            "page, up to 30 stored), or view another player's by mentioning them."
+        ),
+        syntax="-history [@player]",
+        slash_syntax="/history [name:<@user>]",
+        examples=("-history", "-history @Senko", "/history name:@Senko"),
     ),
     _cmd(
         "stats",
@@ -167,13 +170,12 @@ _register_many(
     ),
     _cmd(
         "adhelp",
-        description="Show admin-only commands.",
-        syntax="-adhelp",
-        slash_syntax="Not available as a slash command.",
+        description="Show admin-only commands, or detailed help for one admin command.",
+        syntax="-adhelp [command]",
+        slash_syntax="/adhelp [command:<name>]",
         permission="Elo Bot Manager",
-        examples=("-adhelp",),
+        examples=("-adhelp", "-adhelp revert", "/adhelp command:revert"),
         admin=True,
-        is_slash=False,
     ),
     _cmd(
         "register_o",
@@ -219,18 +221,32 @@ _register_many(
         "ad_rp",
         description="Report a match using Discord IDs (admin only).",
         syntax="-ad_rp <id1> <score1> <score2> <id2>  |  -ad_rp <id1> <score> <id2>",
-        slash_syntax="/ad rp player1_id:<id> winner_score:<3|4> loser_score:<0-3> player2_id:<id>",
+        slash_syntax="/ad rp player1_id:<id> p1_score:<0-4> p2_score:<0-3> player2_id:<id>",
         permission="Elo Bot Manager",
-        examples=("-ad_rp 111 3 1 222", "/ad_rp player1_id:111 winner_score:3 loser_score:1 player2_id:222"),
+        examples=("-ad_rp 111 3 1 222", "/ad_rp player1_id:111 p1_score:3 p2_score:1 player2_id:222"),
         admin=True,
     ),
     _cmd(
         "revert",
-        description="Revert a previously confirmed match (admin only).",
-        syntax="-revert <winner_id> <score1> <score2> <loser_id>  |  -revert <winner_id> <score> <loser_id>",
-        slash_syntax="/revert winner_id:<id> winner_score:<3|4> loser_score:<0-3> loser_id:<id>",
+        description=(
+            "Undo a previously confirmed match report (admin only). Revert reverses "
+            "the exact Elo, win/loss, and monthly-games changes that report applied, "
+            "then deletes the match from history. Use the same player IDs and scores "
+            "that were used in the original `/report` (or `/ad_rp`) - in the same "
+            "order - so the bot knows exactly which match to undo. It does not matter "
+            "who technically \"won\"; just re-enter player1_id/p1_score/p2_score/"
+            "player2_id exactly as reported."
+        ),
+        syntax="-revert <player1_id> <p1_score> <p2_score> <player2_id>  |  -revert <player1_id> <combined_score> <player2_id>",
+        slash_syntax="/revert player1_id:<id> p1_score:<0-4> p2_score:<0-3> player2_id:<id>",
         permission="Elo Bot Manager",
-        examples=("-revert 111 3 1 222", "/revert winner_id:111 winner_score:3 loser_score:1 loser_id:222"),
+        examples=(
+            "If a match was reported with `-report @Senko 3 1 @Autony`, undo it with "
+            "`-revert <Senko_id> 3 1 <Autony_id>` - same scores, same order.",
+            "-revert 111 3 1 222",
+            "-revert 111 31 222",
+            "/revert player1_id:111 p1_score:3 p2_score:1 player2_id:222",
+        ),
         admin=True,
     ),
     _cmd(
@@ -292,19 +308,19 @@ _register_many(
     ),
     _cmd(
         "set_gid",
-        aliases=("set_g",),
         description="Set monthly games played by Discord ID (admin only).",
         syntax="-set_gid <discord_id> <games_played>",
-        slash_syntax="/set_g discord_id:<id> games_played:<number>",
+        slash_syntax="Not available as a slash command.",
         permission="Elo Bot Manager",
-        examples=("-set_gid 111 12", "/set_g discord_id:111 games_played:12"),
+        examples=("-set_gid 111 12",),
         admin=True,
+        is_slash=False,
     ),
     _cmd(
         "set_stats",
         description="Set all stats for a player by Discord ID (admin only).",
         syntax="-set_stats <discord_id> <elo> <wins> <losses> <games_played>",
-        slash_syntax="/set stats discord_id:<id> elo:<n> wins:<n> losses:<n> games_played:<n>",
+        slash_syntax="/set_stats discord_id:<id> elo:<n> wins:<n> losses:<n> games_played:<n>",
         permission="Elo Bot Manager",
         examples=("-set_stats 111 600 10 5 15", "/set_stats discord_id:111 elo:600 wins:10 losses:5 games_played:15"),
         admin=True,
@@ -330,6 +346,19 @@ def public_command_names() -> list[str]:
     names: list[str] = []
     for entry in COMMAND_HELP.values():
         if entry.admin or entry.private:
+            continue
+        names.append(entry.name)
+        names.extend(entry.aliases)
+    return sorted(set(names))
+
+
+def admin_command_names() -> list[str]:
+    """Command names (+ aliases) for admin-only entries, used by /adhelp's
+    autocomplete so a regular member's /help never shows these, while
+    /adhelp (itself admin-gated) still offers them as suggestions."""
+    names: list[str] = []
+    for entry in COMMAND_HELP.values():
+        if not entry.admin:
             continue
         names.append(entry.name)
         names.extend(entry.aliases)

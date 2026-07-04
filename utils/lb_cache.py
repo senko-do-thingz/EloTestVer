@@ -96,7 +96,7 @@ def schedule_rebuild(bot: "discord.ext.commands.Bot", guild_id: int) -> None:
     """
     old = _rebuild_tasks.get(guild_id)
     if old and not old.done():
-        logger.debug("LB cache rebuild CANCELLED (old task) for guild %s — new rebuild scheduled", guild_id)
+        logger.debug("LB cache rebuild CANCELLED (old task) for guild %s - new rebuild scheduled", guild_id)
         old.cancel()
     logger.debug("LB cache rebuild SCHEDULED for guild %s", guild_id)
     task = asyncio.create_task(_rebuild_guild(bot, guild_id))

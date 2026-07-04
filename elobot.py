@@ -55,6 +55,20 @@ async def on_ready():
     print(f"Logged in as {bot.user}")
     await bot.change_presence(activity=discord.Game(name="-help | /help"))
 
+    # Remove any stale guild-specific command registrations. If commands were
+    # ever synced directly to a guild in the past, Discord keeps them
+    # separate from the global commands, which makes the same command
+    # (e.g. /set_e, /set_stats) show up twice in the command list. Clearing
+    # guild-specific commands for every guild the bot is currently in and
+    # then syncing only the global command tree ensures each command exists
+    # exactly once.
+    for guild in bot.guilds:
+        try:
+            bot.tree.clear_commands(guild=guild)
+            await bot.tree.sync(guild=guild)
+        except Exception as exc:
+            print(f"Failed to clear guild commands for {guild.id}: {exc}")
+
     try:
         synced = await bot.tree.sync()
         print(f"Synced {len(synced)} slash command(s)")
@@ -173,7 +187,7 @@ async def load_extensions():
             continue  # skip __init__ and private helpers
 
         if module_info.ispkg:
-            # Skip cogs/private/ — handled separately below.
+            # Skip cogs/private/ - handled separately below.
             if module_info.name == "private":
                 continue
             # Auto-detect: load the sub-package only if its __init__.py
@@ -215,7 +229,7 @@ async def load_extensions():
             # bot_log needs the bot to be ready – defer until on_ready
             _failed_extensions.append((ext, e))
 
-    # Load private cogs from cogs/private/ — must come AFTER main cogs so that
+    # Load private cogs from cogs/private/ - must come AFTER main cogs so that
     # cogs like PrivateHelpCog can safely call bot.remove_command("help").
     for module_info in pkgutil.iter_modules(_private_cogs_pkg.__path__):
         if module_info.name.startswith("_"):
@@ -230,7 +244,7 @@ async def load_extensions():
         except (commands.ExtensionAlreadyLoaded, commands.ExtensionFailed) as e:
             # ExtensionAlreadyLoaded: extension registered twice (e.g. Windows __pycache__ artefact).
             # ExtensionFailed wrapping ClientException("Cog already loaded"): cog was added via
-            # a direct add_cog path before load_extension ran — treat as already loaded.
+            # a direct add_cog path before load_extension ran - treat as already loaded.
             inner = getattr(e, "original", e)
             if isinstance(e, commands.ExtensionAlreadyLoaded) or (
                 isinstance(inner, discord.ClientException)

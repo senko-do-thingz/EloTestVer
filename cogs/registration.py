@@ -8,6 +8,7 @@ from discord.ext import commands
 
 from db.elo_db import db_connection
 from utils import is_valid_name, is_admin, update_lb_name, sync_against_names, NAME_RULE_TEXT
+from utils.lb_cache import invalidate as lb_cache_invalidate, schedule_rebuild as lb_cache_rebuild
 from config import YES_EMOJI, NO_EMOJI
 
 logger = logging.getLogger(__name__)
@@ -335,6 +336,14 @@ class RegistrationCog(commands.Cog):
             update_lb_name(ctx.guild.id, current_name, new_name)
         except Exception:
             logger.exception("Failed to update lb name for guild %s", ctx.guild.id)
+
+        # The /leaderboard image cache embeds player names in the rendered
+        # PNG. Without invalidating it here, a renamed player's old name
+        # would keep showing on cached leaderboard pages (even after
+        # pressing Refresh) until some unrelated Elo change happened to
+        # invalidate the cache.
+        lb_cache_invalidate(ctx.guild.id)
+        lb_cache_rebuild(self.bot, ctx.guild.id)
 
         await self._remove_bot_reactions(message)
         await message.edit(embed=discord.Embed(

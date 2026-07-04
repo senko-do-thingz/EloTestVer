@@ -1,5 +1,5 @@
 """
-cogs/roles — split from the monolithic roles.py.
+cogs/roles - split from the monolithic roles.py.
 
 Sub-modules
 -----------

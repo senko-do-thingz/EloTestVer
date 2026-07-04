@@ -31,7 +31,7 @@ def _assets_dir() -> str:
 def _resolve_cjk_font_asset() -> str | None:
     """
     Return the path to a CJK font file already present in assets/, or None.
-    Font files must be bundled manually — no automatic download is performed.
+    Font files must be bundled manually - no automatic download is performed.
     Supported filenames (checked in order):
       - NotoSansCJKsc-Regular.otf  (preferred)
       - NotoSansCJK-Regular.ttc
@@ -385,22 +385,47 @@ _HIST_SEPARATOR = (65, 68, 74)
 HistoryRowTuple = tuple[str, str, int, int, int, int, int]
 
 
+def _circular_avatar(avatar_bytes: bytes, size: int) -> Image.Image | None:
+    """Decode raw avatar bytes into a circular RGBA thumbnail of ``size`` px,
+    ready to be pasted directly onto a rendered image."""
+    try:
+        im = Image.open(io.BytesIO(avatar_bytes)).convert("RGBA")
+    except Exception:
+        return None
+    im = im.resize((size, size), Image.LANCZOS)
+    mask = Image.new("L", (size, size), 0)
+    ImageDraw.Draw(mask).ellipse((0, 0, size, size), fill=255)
+    out = Image.new("RGBA", (size, size))
+    out.paste(im, (0, 0), mask)
+    return out
+
+
 def render_history_image(
     rows: list[HistoryRowTuple],
     *,
     title: str,
     summary: str | None = None,
     width: int = 620,
+    highest_streak: int | None = None,
+    avatar_bytes: bytes | None = None,
 ) -> io.BytesIO:
     """
     Render match history rows as a PNG "log" table, ClashPerk-style:
     a colored win/loss accent bar per row + a DATE/OPPONENT/W/L/+-/INIT/FINAL
     grid, instead of a plain text table or a wall of embed fields.
+
+    If ``highest_streak`` is given, a small "Best Streak" badge is drawn on
+    the right side of the summary row. This is purely cosmetic: win streak
+    never factors into the Elo math.
+
+    If ``avatar_bytes`` is given, the player's avatar is drawn as a small
+    circular thumbnail directly in front of the title (to its left), inside
+    the image itself.
     """
     row_height = 42 * SCALE
     pad_x = 20 * SCALE
     title_h = 34 * SCALE
-    summary_h = 26 * SCALE if summary else 0
+    summary_h = 26 * SCALE if (summary or highest_streak is not None) else 0
     col_header_h = 30 * SCALE
     pad_bottom = 14 * SCALE
     accent_w = 4 * SCALE
@@ -432,13 +457,38 @@ def render_history_image(
     content_x0 = pad_x + accent_w + accent_gap
 
     # ── title / summary ────────────────────────────────────────────────
-    draw.text((pad_x, 8 * SCALE), title, fill=_LB_TEXT, font=title_font)
+    title_x = pad_x
+    title_y = 8 * SCALE
+    avatar_size = 26 * SCALE
+    if avatar_bytes:
+        avatar_img = _circular_avatar(avatar_bytes, avatar_size)
+        if avatar_img is not None:
+            # Center the avatar on the title text's actual visual bounding
+            # box (not just its font-metric line height), so it lines up
+            # with the letters regardless of font/script.
+            probe_bbox = draw.textbbox((0, title_y), title, font=title_font)
+            text_center_y = (probe_bbox[1] + probe_bbox[3]) / 2
+            avatar_y = int(text_center_y - avatar_size / 2)
+            img.paste(avatar_img, (pad_x, avatar_y), avatar_img)
+            title_x = pad_x + avatar_size + 8 * SCALE
+
+    draw.text((title_x, title_y), title, fill=_LB_TEXT, font=title_font)
     if summary:
         draw.text(
             (pad_x, title_h + 4 * SCALE),
             summary,
             fill=_LB_TEXT_MUTED,
             font=summary_font,
+        )
+    if highest_streak is not None:
+        streak_text = f"Best Streak: {highest_streak}"
+        streak_font = _load_latin_font(14 * SCALE, bold=True)
+        streak_w = draw.textlength(streak_text, font=streak_font)
+        draw.text(
+            (width_px - pad_x - streak_w, title_h + 4 * SCALE),
+            streak_text,
+            fill=_LB_TEXT,
+            font=streak_font,
         )
 
     # ── column headers ─────────────────────────────────────────────────
@@ -511,6 +561,8 @@ async def render_history_image_async(
     title: str,
     summary: str | None = None,
     width: int = 620,
+    highest_streak: int | None = None,
+    avatar_bytes: bytes | None = None,
 ) -> io.BytesIO:
     """Async wrapper around render_history_image (see render_leaderboard_image_async)."""
     return await asyncio.to_thread(
@@ -519,6 +571,8 @@ async def render_history_image_async(
         title=title,
         summary=summary,
         width=width,
+        highest_streak=highest_streak,
+        avatar_bytes=avatar_bytes,
     )
 
 # ---------------------------------------------------------------------------

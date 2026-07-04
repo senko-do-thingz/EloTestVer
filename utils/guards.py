@@ -37,7 +37,7 @@ _VALID_NAME_RE = re.compile(
 # Human-readable description of is_valid_name()'s rules, shared by the
 # registration error messages and the -help / /help text for register/rename.
 NAME_RULE_TEXT = (
-    "Name must be 2-25 characters and only contain English letters, "
+    "Name must be 2-16 characters and only contain English letters, "
     "accented letters (e.g. à, ü), Chinese/Japanese/Korean characters, "
     "numbers, '.' and '_'. Names containing \"elobot\" are not allowed."
 )
@@ -49,12 +49,12 @@ def is_valid_name(name: str) -> tuple[bool, str]:
         return False, "banned"
 
     # Check length (keep existing UX expectations).
-    if not (2 <= len(name) <= 25):
+    if not (2 <= len(name) <= 16):
         return False, "invalid_length"
 
     # Allowed: ASCII letters/digits/underscore, Latin with diacritics,
     # CJK (Chinese/Japanese Kanji), Hiragana, Katakana, Korean Hangul,
-    # dot (.) — everything else is rejected.
+    # dot (.) - everything else is rejected.
     if not _VALID_NAME_RE.match(name):
         return False, "invalid_format"
 
