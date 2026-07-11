@@ -325,6 +325,21 @@ _register_many(
         examples=("-set_stats 111 600 10 5 15", "/set_stats discord_id:111 elo:600 wins:10 losses:5 games_played:15"),
         admin=True,
     ),
+    _cmd(
+        "c_reg",
+        description=(
+            "Clear all registered player data for this server (admin only). "
+            "Deletes every player's registration along with their match "
+            "history and head-to-head stats. Asks for reaction confirmation "
+            "first; this cannot be undone."
+        ),
+        syntax="-c_reg",
+        slash_syntax="Not available as a slash command.",
+        permission="Elo Bot Manager",
+        examples=("-c_reg",),
+        admin=True,
+        is_slash=False,
+    ),
 )
 
 

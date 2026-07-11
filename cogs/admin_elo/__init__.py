@@ -5,9 +5,10 @@ Sub-modules
 -----------
 base         : AdminEloBaseCog  (shared helper: _remove_bot_reactions)
 decay        : AdminEloDecayCog (decay, reset_e)
-registration : no-op stub. register/rename (public + admin_o/admin_oid
-               variants) live in cogs/registration.py - see that module's
-               docstring for why this one no longer duplicates them.
+registration : AdminEloRegistrationCog (c_reg). register/rename (public +
+               admin_o/admin_oid variants) live in cogs/registration.py -
+               see that module's docstring for why this one doesn't
+               duplicate them.
 setters      : AdminEloSettersCog (set_e, set_eid, set_w, set_wid,
                                    set_l, set_lid, set_gid, set_stats)
 """

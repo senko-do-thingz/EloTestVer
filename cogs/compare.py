@@ -122,12 +122,17 @@ class CompareView(discord.ui.LayoutView):
                 await interaction_or_ctx.send(embed=error_embed)
             return
 
+        avatar1_bytes = await self.cog._safe_fetch_avatar_bytes(self.ctx.guild, self.user_id1)
+        avatar2_bytes = await self.cog._safe_fetch_avatar_bytes(self.ctx.guild, self.user_id2)
+
         filename = "compare.png"
         buf = await render_compare_image_async(
             data["rows"],
             name1=data["name1"],
             name2=data["name2"],
             winner_text=data["winner_text"],
+            avatar1_bytes=avatar1_bytes,
+            avatar2_bytes=avatar2_bytes,
         )
         file = discord.File(buf, filename=filename)
 
@@ -160,6 +165,19 @@ class Compare(commands.Cog):
             return user.mention
         except Exception:
             return f"<@{user_obj_or_id}>"
+
+    async def _safe_fetch_avatar_bytes(
+        self, guild: discord.Guild, user_id: int
+    ) -> typing.Optional[bytes]:
+        """Resolve a player's avatar bytes for the compare image, preferring
+        the cached guild member (avoids an extra API call) and falling back
+        to fetch_user. Returns None if the user can't be resolved or the
+        avatar can't be read, so the caller can fall back to name text."""
+        try:
+            user_obj = guild.get_member(user_id) or await self.bot.fetch_user(user_id)
+            return await user_obj.display_avatar.read()
+        except Exception:
+            return None
 
     def _fetch_compare_data(
         self, cursor, user_id1: int, user_id2: int

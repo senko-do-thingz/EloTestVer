@@ -38,6 +38,7 @@ class RegistrationCog(commands.Cog):
     @app_commands.describe(name="Your registered display name")
     @app_commands.guild_only()
     async def register(self, ctx: commands.Context, name: str = None):
+        prompt: discord.Message | None = None
         if name is None:
             prompt = await ctx.send(embed=discord.Embed(
                 title="Registration",
@@ -58,7 +59,7 @@ class RegistrationCog(commands.Cog):
                     "message", timeout=300.0, check=check
                 )
             except asyncio.TimeoutError:
-                await ctx.send(embed=discord.Embed(
+                await prompt.edit(embed=discord.Embed(
                     title="Timeout",
                     description="Timed out. Please try again.",
                     color=discord.Color.red(),
@@ -67,34 +68,45 @@ class RegistrationCog(commands.Cog):
 
             name = (reply.content or "").strip()
             if not name:
-                await ctx.send(embed=discord.Embed(
+                await prompt.edit(embed=discord.Embed(
                     title="Registration Failed",
                     description="No name provided. Please try again.",
                     color=discord.Color.red(),
                 ))
                 return
 
+        # Modified: once we've prompted for a reply, the prompt message is
+        # edited through every subsequent outcome (failure or success)
+        # instead of a new message being sent, so the whole flow plays out
+        # on that single message. If a name was passed directly (no prompt
+        # was ever shown), fall back to sending a fresh message as before.
+        async def _finish(embed: discord.Embed) -> None:
+            if prompt is not None:
+                await prompt.edit(embed=embed)
+            else:
+                await ctx.send(embed=embed)
+
         is_valid, reason = is_valid_name(name)
         if not is_valid:
-            await ctx.send(embed=_name_error_embed(reason))
+            await _finish(_name_error_embed(reason))
             return
 
         user_id = str(ctx.author.id)
         with db_connection(ctx.guild.id) as (conn, cursor):
-            cursor.execute("SELECT name FROM players WHERE name = ?", (name,))
+            cursor.execute("SELECT id FROM players WHERE id = ?", (user_id,))
             if cursor.fetchone():
-                await ctx.send(embed=discord.Embed(
+                await _finish(discord.Embed(
                     title="Registration Failed",
-                    description=f"The name `{name}` is already taken. Please choose a different name.",
+                    description="You are already registered!",
                     color=discord.Color.red(),
                 ))
                 return
 
-            cursor.execute("SELECT id FROM players WHERE id = ?", (user_id,))
+            cursor.execute("SELECT name FROM players WHERE name = ?", (name,))
             if cursor.fetchone():
-                await ctx.send(embed=discord.Embed(
+                await _finish(discord.Embed(
                     title="Registration Failed",
-                    description="You are already registered!",
+                    description=f"The name `{name}` is already taken. Please choose a different name.",
                     color=discord.Color.red(),
                 ))
                 return
@@ -102,7 +114,7 @@ class RegistrationCog(commands.Cog):
             cursor.execute("INSERT INTO players (id, name, elo) VALUES (?, ?, 500)", (user_id, name))
             conn.commit()
 
-        await ctx.send(embed=discord.Embed(
+        await _finish(discord.Embed(
             title="Player Registered",
             description=f"**{name}** has been registered with an Elo of 500!",
             color=discord.Color.green(),
@@ -129,21 +141,21 @@ class RegistrationCog(commands.Cog):
 
         user_id = str(member.id)
         with db_connection(ctx.guild.id) as (conn, cursor):
-            cursor.execute("SELECT name FROM players WHERE name = ?", (name,))
-            if cursor.fetchone():
-                await ctx.send(embed=discord.Embed(
-                    title="Registration Failed",
-                    description=f"The name `{name}` is already taken. Please choose a different name.",
-                    color=discord.Color.red(),
-                ))
-                return
-
             cursor.execute("SELECT id FROM players WHERE id = ?", (user_id,))
             if cursor.fetchone():
                 await ctx.send(embed=discord.Embed(
                     title="Already Registered",
                     description=f"`{member.name}` is already registered!",
                     color=discord.Color.orange(),
+                ))
+                return
+
+            cursor.execute("SELECT name FROM players WHERE name = ?", (name,))
+            if cursor.fetchone():
+                await ctx.send(embed=discord.Embed(
+                    title="Registration Failed",
+                    description=f"The name `{name}` is already taken. Please choose a different name.",
+                    color=discord.Color.red(),
                 ))
                 return
 
@@ -205,15 +217,6 @@ class RegistrationCog(commands.Cog):
             return
 
         with db_connection(ctx.guild.id) as (conn, cursor):
-            cursor.execute("SELECT name FROM players WHERE name = ?", (name,))
-            if cursor.fetchone():
-                await ctx.send(embed=discord.Embed(
-                    title="Registration Failed",
-                    description=f"The name `{name}` is already taken. Please choose a different name.",
-                    color=discord.Color.red(),
-                ))
-                return
-
             cursor.execute("SELECT name FROM players WHERE id = ?", (user_id,))
             existing = cursor.fetchone()
             if existing:
@@ -221,6 +224,15 @@ class RegistrationCog(commands.Cog):
                     title="Already Registered",
                     description=f"Player `{existing[0]}` is already registered!",
                     color=discord.Color.orange(),
+                ))
+                return
+
+            cursor.execute("SELECT name FROM players WHERE name = ?", (name,))
+            if cursor.fetchone():
+                await ctx.send(embed=discord.Embed(
+                    title="Registration Failed",
+                    description=f"The name `{name}` is already taken. Please choose a different name.",
+                    color=discord.Color.red(),
                 ))
                 return
 

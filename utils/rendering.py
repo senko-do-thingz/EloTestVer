@@ -594,25 +594,26 @@ def render_compare_image(
     name2: str,
     winner_text: str,
     width: int = 560,
+    avatar1_bytes: bytes | None = None,
+    avatar2_bytes: bytes | None = None,
 ) -> io.BytesIO:
     """
     Render a two-player comparison as a PNG "scoreboard" table: player
     names as column headers, one row per stat with the higher value
     highlighted, and a winner-declaration line at the bottom.
+
+    The top title row shows each player's avatar (instead of their name)
+    separated by " vs ". If an avatar is missing (fetch failed or player
+    has no cached avatar bytes), that side falls back to the player's name
+    so the title never ends up blank.
     """
     row_height = 42 * SCALE
     pad_x = 20 * SCALE
-    title_h = 34 * SCALE
+    title_h = 46 * SCALE
     header_h = 30 * SCALE
     winner_h = 40 * SCALE
     pad_bottom = 14 * SCALE
     width_px = width * SCALE
-
-    # Modified: reduced from 190 to bring the two value columns (and the
-    # player-name headers above them) closer to the horizontal center,
-    # instead of sitting visibly right of the centered title above them.
-    label_w = 160 * SCALE
-    value_col_w = (width_px - pad_x * 2 - label_w) // 2
 
     top_h = title_h + header_h
     height_px = top_h + len(rows) * row_height + winner_h + pad_bottom
@@ -627,20 +628,72 @@ def render_compare_image(
     value_font_bold = _load_latin_font(19 * SCALE, bold=True)
     winner_font = _load_lb_font(18 * SCALE, bold=True, for_text=winner_text)
 
+    # Modified: size the label column to the longest label actually used
+    # ("Win Rate (%)", "H2H WR (%)", etc.) instead of a fixed 160px, so the
+    # dead space between a short label like "Elo" and its value column
+    # shrinks too - values sit closer to their labels instead of pulling
+    # the eye all the way to the right.
+    label_gap = 24 * SCALE
+    max_label_w = max((_lb_text_width(draw, label, label_font) for label, _, _, _ in rows), default=0)
+    label_w = min(max_label_w + label_gap, (width_px - pad_x * 2) // 2)
+    value_col_w = (width_px - pad_x * 2 - label_w) // 2
+
     value1_x = pad_x + label_w
     value2_x = value1_x + value_col_w
 
-    # ── title ("Player1 vs Player2") ─────────────────────────────────────
-    title_text = f"{name1}  vs  {name2}"
+    # ── title (avatar1 vs avatar2, name text as a per-side fallback) ────
+    # Centered on each stat column (same x-centers as the name headers and
+    # values below) rather than on the full image width, so avatar1/name1
+    # lines up with player 1's column and avatar2/name2 with player 2's
+    # column, with "vs" sitting at the midpoint between them.
+    col1_center_x = value1_x + value_col_w // 2
+    col2_center_x = value2_x + value_col_w // 2
     title_max_w = width_px - pad_x * 2
-    display_title = _lb_truncate_text(draw, title_text, title_font, title_max_w)
-    title_w = _lb_text_width(draw, display_title, title_font)
-    draw.text(
-        ((width_px - title_w) // 2, 8 * SCALE),
-        display_title,
-        fill=_LB_TEXT,
-        font=title_font,
+
+    avatar_size = 34 * SCALE
+    vs_text = "vs"
+    vs_w = _lb_text_width(draw, vs_text, title_font)
+
+    avatar1_img = _circular_avatar(avatar1_bytes, avatar_size) if avatar1_bytes else None
+    avatar2_img = _circular_avatar(avatar2_bytes, avatar_size) if avatar2_bytes else None
+
+    # Fallback text for whichever side is missing an avatar, truncated to
+    # its own column width so it can't collide with the other column.
+    name1_fallback = None if avatar1_img is not None else _lb_truncate_text(
+        draw, name1, title_font, value_col_w - 8 * SCALE
     )
+    name2_fallback = None if avatar2_img is not None else _lb_truncate_text(
+        draw, name2, title_font, value_col_w - 8 * SCALE
+    )
+
+    title_y = 8 * SCALE
+    title_row_h = max(avatar_size, title_font.size if hasattr(title_font, "size") else 22 * SCALE)
+    title_center_y = title_y + title_row_h / 2
+
+    if avatar1_img is not None:
+        img.paste(
+            avatar1_img,
+            (col1_center_x - avatar_size // 2, int(title_center_y - avatar_size / 2)),
+            avatar1_img,
+        )
+    else:
+        name1_w = _lb_text_width(draw, name1_fallback, title_font)
+        draw.text((col1_center_x - name1_w // 2, title_y), name1_fallback, fill=_LB_TEXT, font=title_font)
+
+    if avatar2_img is not None:
+        img.paste(
+            avatar2_img,
+            (col2_center_x - avatar_size // 2, int(title_center_y - avatar_size / 2)),
+            avatar2_img,
+        )
+    else:
+        name2_w = _lb_text_width(draw, name2_fallback, title_font)
+        draw.text((col2_center_x - name2_w // 2, title_y), name2_fallback, fill=_LB_TEXT, font=title_font)
+
+    vs_center_x = (col1_center_x + col2_center_x) // 2
+    vs_bbox = draw.textbbox((0, 0), vs_text, font=title_font)
+    vs_y = int(title_center_y - (vs_bbox[3] - vs_bbox[1]) / 2 - vs_bbox[1])
+    draw.text((vs_center_x - vs_w // 2, vs_y), vs_text, fill=_LB_TEXT_MUTED, font=title_font)
 
     # ── column headers ─────────────────────────────────────────────────
     header_y = title_h + 4 * SCALE
@@ -724,6 +777,8 @@ async def render_compare_image_async(
     name2: str,
     winner_text: str,
     width: int = 560,
+    avatar1_bytes: bytes | None = None,
+    avatar2_bytes: bytes | None = None,
 ) -> io.BytesIO:
     """Async wrapper around render_compare_image (see render_leaderboard_image_async)."""
     return await asyncio.to_thread(
@@ -733,4 +788,6 @@ async def render_compare_image_async(
         name2=name2,
         winner_text=winner_text,
         width=width,
+        avatar1_bytes=avatar1_bytes,
+        avatar2_bytes=avatar2_bytes,
     )
