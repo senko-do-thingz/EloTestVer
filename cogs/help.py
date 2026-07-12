@@ -60,6 +60,14 @@ def _general_commands_list(guild_id: int) -> list[tuple[str, str]]:
                 "Show your stats / Show another player's stats.",
             ),
             (
+                "/stats expanded",
+                "Show your averaged/summed stats across one or more season/month combinations.",
+            ),
+            (
+                "/export history",
+                "Export your full match history to an Excel (.xlsx) file.",
+            ),
+            (
                 "-compare / -cp / /compare",
                 "Compare two players.",
             ),
@@ -72,6 +80,10 @@ def _general_commands_list(guild_id: int) -> list[tuple[str, str]]:
                 "Show this list or detailed help for one command.",
             ),
             ("-adhelp / /adhelp", "Show the admin help message."),
+            (
+                "/msg <content>",
+                "DM the bot to send a private message to the support team.",
+            ),
         ]
     )
     if guild_id == PRIVATE_GUILD_ID:
@@ -82,6 +94,11 @@ def _general_commands_list(guild_id: int) -> list[tuple[str, str]]:
                 ("-st <server_id> <player_id>", "View a player's stats in another server."),
                 ("-log [<channel> | off]", "Set or clear the bot log channel."),
                 ("-hpbd <@user> <server_id>", "Send a birthday message in another server."),
+                ("-status", "Show internal bot/process status."),
+                (
+                    "-support [<channel> | off]",
+                    "Set or clear the channel /msg relays DM messages into.",
+                ),
             ]
         )
     return commands_list
@@ -287,7 +304,16 @@ class HelpCog(commands.Cog):
         stats_commands = [
             (
                 "-decay",
-                "Automatically **increase** or **decrease** Elo for all players.",
+                "Manually run Elo decay for all players (also runs automatically "
+                "every calendar month - see -decay_setup).",
+            ),
+            (
+                "-decay_setup <channel>",
+                "Set or clear the channel the automatic monthly -decay change log is posted to.",
+            ),
+            (
+                "-nickname <server_id> <name>",
+                "Assign this server's nickname, used for -get_lb/-sum_lb/-decay file names.",
             ),
             ("-reset_e", "Set **Elo** for all players to 500."),
             ("-set_e <@player> <elo> / /set_e", "Set **Elo** for a specific player."),

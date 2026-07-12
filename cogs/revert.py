@@ -285,7 +285,7 @@ class RevertCog(commands.Cog):
         mismatch_warning = ""
         if has_mismatch:
             mismatch_warning = (
-                f"\n\n⚠️ **Warning:** Current Elo ratings do not exactly match the expected "
+                f"\n\n**Warning:** Current Elo ratings do not exactly match the expected "
                 f"outcome of this score (expected {verify['new_winner_elo']}/{verify['new_loser_elo']}, "
                 f"actual {cur_winner_elo}/{cur_loser_elo}). "
                 "The Elo may have been manually adjusted, or this may not be the most recent match. "

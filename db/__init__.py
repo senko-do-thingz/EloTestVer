@@ -6,15 +6,30 @@ Command modules (cogs) must never use sqlite3 directly.
 """
 
 from .elo_db import (  # noqa: F401
+    clear_msg_ban,
     db_connection,
     db_exists,
     get_database_connection,
     get_db_path,
+    get_decay_log_channel_id,
     get_dev_mode,
     get_language,
     get_log_channel_id,
+    get_msg_ban_reason,
+    get_nickname,
+    get_support_channel_id,
+    get_support_notify_message_id,
+    get_support_thread_id,
+    get_support_user_id_by_thread,
+    list_all_guild_ids,
+    set_decay_log_channel_id,
     set_dev_mode,
     set_log_channel_id,
+    set_msg_ban,
+    set_nickname,
+    set_support_channel_id,
+    set_support_notify_message_id,
+    set_support_thread_id,
 )
 from .h2h_db import (  # noqa: F401
     add_h2h_match,

@@ -135,6 +135,19 @@ _register_many(
         ),
     ),
     _cmd(
+        "export_history",
+        aliases=("export history",),
+        description=(
+            "Export your full match history to an Excel (.xlsx) file, sent as "
+            "an attachment. The workbook has one sheet per season, and within "
+            "each season's sheet, one table per month with date, opponent, "
+            "score, Elo change, and Elo before/after for every match."
+        ),
+        syntax="Not available as a prefix command.",
+        slash_syntax="/export history",
+        examples=("/export history",),
+    ),
+    _cmd(
         "stats",
         description="View Elo, wins, losses, and league info for yourself or another player.",
         syntax="-stats [@player | name | id]",
@@ -145,6 +158,29 @@ _register_many(
             "/stats name:Senko",
             "/stats mention:@Senko",
             "/stats discord_id:123456789012345678",
+        ),
+    ),
+    _cmd(
+        "stats_expanded",
+        aliases=("stats expanded",),
+        description=(
+            "View your Elo, wins, losses, and win rate averaged/summed across "
+            "one or more season/month combinations. Each entry in the "
+            "`seasons` field is written as `s<season>` (that season's Overall "
+            "stats) or `s<season>m<month>m<month>...` (that season, only the "
+            "listed months), and multiple entries are separated by a space to "
+            "combine and average them together. If you list every month of a "
+            "season, it automatically collapses to that season's Overall "
+            "stats. If you are not currently registered, the bot falls back "
+            "to the name recorded (by your Discord ID) in the archive for the "
+            "first season/month you list."
+        ),
+        syntax="Not available as a prefix command.",
+        slash_syntax="/stats expanded seasons:<s1m1m2 s2m2 ...>",
+        examples=(
+            "/stats expanded seasons:s2",
+            "/stats expanded seasons:s1m2",
+            "/stats expanded seasons:s1m1m2 s2m2 s3m1m2m3",
         ),
     ),
     _cmd(
@@ -395,8 +431,16 @@ def public_command_names() -> list[str]:
     for entry in COMMAND_HELP.values():
         if entry.admin or entry.private:
             continue
-        names.append(entry.name)
-        names.extend(entry.aliases)
+        space_form = entry.name.replace("_", " ")
+        if space_form in entry.aliases:
+            # The underscore name (e.g. "export_history") is not itself a
+            # usable command, only the space form (e.g. "export history")
+            # is - so show only the space form, not both.
+            names.append(space_form)
+            names.extend(a for a in entry.aliases if a != space_form)
+        else:
+            names.append(entry.name)
+            names.extend(entry.aliases)
     return sorted(set(names))
 
 

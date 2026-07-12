@@ -16,6 +16,20 @@ logger = logging.getLogger(__name__)
 ACCENT_COLOR = discord.Color.blue()
 
 
+def _effective_daily_streak(daily_streak: int, last_played_date: str | None) -> int:
+    """Same lazy zeroing rule as db.elo_db.get_effective_daily_streak, but
+    operating on an already-fetched row so the leaderboard can compute this
+    for every player in one query instead of one query per player."""
+    if not last_played_date:
+        return 0
+    last_date = datetime.strptime(last_played_date, "%Y-%m-%d").date()
+    today = datetime.now(timezone.utc).date()
+    day_gap = (today - last_date).days
+    if day_gap > 1:
+        return 0
+    return daily_streak or 0
+
+
 def _footer_text(last_updated: datetime | None, note: str | None) -> str:
     """Build the 'Last updated' line + note. Uses <t:...:R> so Discord
     updates the relative time client-side, without the bot re-editing the message."""
@@ -50,6 +64,16 @@ class LeaderboardDropdown(discord.ui.Select):
                 label="🎮 Monthly Games Played",
                 value="games_played_this_month",
                 description="Players with the most monthly games played",
+            ),
+            discord.SelectOption(
+                label="🔥 Daily Streak",
+                value="daily_streak",
+                description="Players with the longest active daily streak",
+            ),
+            discord.SelectOption(
+                label="🔥 Win Streak",
+                value="win_streak",
+                description="Players with the longest current win streak",
             ),
         ]
         super().__init__(
@@ -217,7 +241,10 @@ class LeaderboardView(discord.ui.LayoutView):
 
     async def _render_leaderboard(self, interaction_or_ctx, cursor) -> None:
         cursor.execute(
-            "SELECT name, elo, games_won, games_lost FROM players WHERE id=?",
+            "SELECT p.name, p.elo, p.games_won, p.games_lost, p.win_streak, "
+            "COALESCE(d.daily_streak, 0), d.last_played_date "
+            "FROM players p LEFT JOIN daily_streaks d ON d.player_id = p.id "
+            "WHERE p.id=?",
             (self.target_user_id,),
         )
         target_row = cursor.fetchone()
@@ -227,6 +254,10 @@ class LeaderboardView(discord.ui.LayoutView):
         target_wins = target_row[2] if target_row else 0
         target_losses = target_row[3] if target_row else 0
         target_total_games = target_wins + target_losses
+        target_win_streak = target_row[4] if target_row else 0
+        target_daily_streak = (
+            _effective_daily_streak(target_row[5], target_row[6]) if target_row else 0
+        )
 
         note_text = None
         title = ""
@@ -305,6 +336,40 @@ class LeaderboardView(discord.ui.LayoutView):
             target_eligible = target_total_games > 0
             if target_registered and not target_eligible:
                 note_text = "Play at least one set to be ranked"
+
+        elif self.category == "daily_streak":
+            title = "Daily Streak"
+            cursor.execute(
+                "SELECT p.id, p.name, COALESCE(d.daily_streak, 0), d.last_played_date "
+                "FROM players p LEFT JOIN daily_streaks d ON d.player_id = p.id"
+            )
+            rows_with_streak = [
+                (pid, name, _effective_daily_streak(streak, last_played_date))
+                for pid, name, streak, last_played_date in cursor.fetchall()
+            ]
+            rows_with_streak.sort(key=lambda x: x[2], reverse=True)
+            for pid, name, streak in rows_with_streak:
+                if streak == 0:
+                    continue
+                display_players.append((pid, name, streak))
+
+            target_eligible = target_daily_streak > 0
+            if target_registered and not target_eligible:
+                note_text = "Play at least one set today to start your streak"
+
+        elif self.category == "win_streak":
+            title = "Win Streak"
+            cursor.execute(
+                "SELECT id, name, win_streak FROM players ORDER BY win_streak DESC"
+            )
+            for pid, name, streak in cursor.fetchall():
+                if not streak:
+                    continue
+                display_players.append((pid, name, streak))
+
+            target_eligible = target_win_streak > 0
+            if target_registered and not target_eligible:
+                note_text = "Win at least one game in a row to be ranked"
 
         if not display_players:
             embed = discord.Embed(

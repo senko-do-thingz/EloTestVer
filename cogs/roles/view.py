@@ -179,7 +179,7 @@ class RolesViewCog(RolesBaseCog):
         for name, min_elo, max_elo, min_kind, max_kind, role_id, discovered in reversed(leagues):
             role_display = self._format_league_display(role_by_id, name, role_id)
             range_display = self._format_range(min_elo, max_elo, min_kind, max_kind)
-            status = "✅ discovered" if discovered else "🔒 undiscovered"
+            status = "discovered" if discovered else "undiscovered"
             member_ids = grouped.get(role_id, []) if role_id else []
             lines.append(
                 f"{role_display}: **{range_display}** - **{len(member_ids)}** player(s) [{status}]"

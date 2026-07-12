@@ -29,7 +29,7 @@ _USER_COMMANDS = {
 _ADMIN_COMMANDS = {
     "ad_rp",
     "revert",
-    "decay", "reset_e",
+    "decay", "decay_setup", "reset_e",
     "set_e", "set_eid",
     "set_w", "set_wid",
     "set_l", "set_lid",
@@ -40,7 +40,7 @@ _ADMIN_COMMANDS = {
     "ladmin", "ledit", "ladd", "lapply", "lclear",
     "lannounce", "lrannounce",
     "set_lan",
-    "log",
+    "log", "support",
 }
 # Always log: viewing another player's stats via ID-based commands
 _STATS_COMMANDS = {"st", "stats_id"}

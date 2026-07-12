@@ -7,7 +7,13 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
-from db.elo_db import db_connection, get_dev_mode, apply_win_streak, get_season_month_cursor
+from db.elo_db import (
+    db_connection,
+    get_dev_mode,
+    apply_win_streak,
+    apply_daily_streak,
+    get_season_month_cursor,
+)
 from db.h2h_db import add_h2h_match
 from db.match_history_db import (
     add_match_history_row,
@@ -491,6 +497,8 @@ class ReportingCog(commands.Cog):
                 increment_player_matches(cursor, loser.id)
                 apply_win_streak(cursor, winner.id, won=True)
                 apply_win_streak(cursor, loser.id, won=False)
+                apply_daily_streak(cursor, winner.id)
+                apply_daily_streak(cursor, loser.id)
                 trim_match_history(cursor, winner.id)
                 trim_match_history(cursor, loser.id)
                 conn.commit()
@@ -764,6 +772,8 @@ class ReportingCog(commands.Cog):
                 increment_player_matches(cursor, loser.id)
                 apply_win_streak(cursor, winner.id, won=True)
                 apply_win_streak(cursor, loser.id, won=False)
+                apply_daily_streak(cursor, winner.id)
+                apply_daily_streak(cursor, loser.id)
                 trim_match_history(cursor, winner.id)
                 trim_match_history(cursor, loser.id)
                 conn.commit()

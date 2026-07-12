@@ -1,3 +1,4 @@
+import os
 import re
 import typing
 from datetime import datetime, timezone
@@ -6,15 +7,179 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
-from db.elo_db import db_connection, db_exists, get_db_path
+from db.elo_db import (
+    db_connection,
+    db_exists,
+    get_db_path,
+    get_effective_daily_streak,
+    get_max_month,
+)
 from utils import (
     format_league_stat_line,
     get_leagues,
+    get_lb_root,
     get_most_played_with,
     get_opponent_games,
+    parse_leaderboard_line,
 )
 from utils.autocomplete import stats_top_elo_name_autocomplete
 from utils.slash_ctx import SlashContext
+
+# ---------------------------------------------------------------------------
+# "-stats expanded" helpers
+#
+# Files read from the season/month leaderboard archive (lb/<guild_id>/...)
+# for a single player. Only these four categories are averaged/summed by
+# "-stats expanded"; "games_played_this_month" is intentionally excluded.
+# ---------------------------------------------------------------------------
+
+EXPANDED_FILE_MAP: dict[str, str] = {
+    "elo": "data.txt",
+    "wins": "w.txt",
+    "losses": "l.txt",
+    "win_rate": "wr.txt",
+}
+
+
+_EXPANDED_TOKEN_RE = re.compile(r"^[sS](\d+)((?:[mM]\d+)*)$")
+_EXPANDED_MONTH_RE = re.compile(r"[mM](\d+)")
+
+
+def _parse_expanded_args(args: str) -> list[tuple[int, list[int]]] | None:
+    """
+    Parse the raw argument string of the "/stats expanded" slash command
+    into a list of (season, months) groups.
+
+    Grammar: whitespace-separated tokens, each shaped "s<season>" followed
+    by zero or more "m<month>" chunks, e.g.:
+        s1m1m2 s2m2 s3m1m2m3
+    means season 1 (months 1, 2), season 2 (month 2), season 3 (months 1,
+    2, 3). A token with no "m" chunks (e.g. "s2") requests that season's
+    Overall stats.
+
+    Returns None if any token doesn't match the "s<num>[m<num>...]" shape,
+    so the caller can show a format-specific error.
+    """
+    tokens = (args or "").split()
+    groups: list[tuple[int, list[int]]] = []
+
+    for token in tokens:
+        match = _EXPANDED_TOKEN_RE.match(token)
+        if not match:
+            return None
+        season = int(match.group(1))
+        months = [int(m) for m in _EXPANDED_MONTH_RE.findall(match.group(2) or "")]
+        groups.append((season, months))
+
+    return groups
+
+
+def _find_dir_by_regex(parent: str, pattern: str) -> str | None:
+    """Return the path of the first subdirectory of `parent` matching
+    `pattern` (case-insensitive, full match), or None if not found."""
+    if not os.path.isdir(parent):
+        return None
+    regex = re.compile(pattern, re.IGNORECASE)
+    for entry in os.listdir(parent):
+        full = os.path.join(parent, entry)
+        if os.path.isdir(full) and regex.match(entry):
+            return full
+    return None
+
+
+def _resolve_season_dir(base: str, season: int) -> str | None:
+    return _find_dir_by_regex(base, rf"^season\s+{season}$")
+
+
+def _resolve_month_dir(season_dir: str, month: int) -> str | None:
+    return _find_dir_by_regex(season_dir, rf"^month\s+{month}$")
+
+
+def _resolve_overall_dir(season_dir: str) -> str | None:
+    return _find_dir_by_regex(season_dir, r"^overall$")
+
+
+def _read_player_stat(
+    dir_path: str, filename: str, player_name_lower: str, *, win_rate: bool = False
+) -> float | int | None:
+    """Look up a single player's value in a leaderboard archive file
+    (data.txt / w.txt / l.txt / wr.txt / games.txt), matched by exact name
+    (case insensitive). Returns None if the file or the player's line is
+    missing."""
+    file_path = os.path.join(dir_path, filename)
+    if not os.path.exists(file_path):
+        return None
+    with open(file_path, "r", encoding="utf-8") as f:
+        lines = f.readlines()
+    for line in lines:
+        stripped = line.strip()
+        if not stripped or stripped.lower().endswith("leaderboard"):
+            continue
+        parsed = parse_leaderboard_line(stripped, win_rate=win_rate)
+        if not parsed:
+            continue
+        name, value, _ = parsed
+        if name.lower() == player_name_lower:
+            return value
+    return None
+
+
+def _get_rank_for_stat(
+    dir_path: str, filename: str, value, *, win_rate: bool = False
+) -> int | None:
+    """Return the 1-based rank of `value` within a leaderboard archive
+    file, or None if the file is missing/empty."""
+    file_path = os.path.join(dir_path, filename)
+    if not os.path.exists(file_path):
+        return None
+    with open(file_path, "r", encoding="utf-8") as f:
+        lines = f.readlines()
+    all_values = []
+    for line in lines:
+        stripped = line.strip()
+        if not stripped or stripped.lower().endswith("leaderboard"):
+            continue
+        parsed = parse_leaderboard_line(stripped, win_rate=win_rate)
+        if parsed:
+            all_values.append(parsed[1])
+    if not all_values:
+        return None
+    return sum(1 for v in all_values if v > value) + 1
+
+
+def _find_player_name_in_archive(dir_path: str | None, user_id: int) -> str | None:
+    """
+    Look up a player's name by Discord ID within a single season/month (or
+    Overall) leaderboard archive directory. Used as a fallback for players
+    who are no longer (or not yet) present in the `players` table, so their
+    historical archive entry still resolves to a name.
+    """
+    if not dir_path or not os.path.isdir(dir_path):
+        return None
+    user_id_str = str(user_id)
+    for filename, win_rate in (
+        ("data.txt", False),
+        ("w.txt", False),
+        ("l.txt", False),
+        ("wr.txt", True),
+        ("games.txt", False),
+    ):
+        file_path = os.path.join(dir_path, filename)
+        if not os.path.exists(file_path):
+            continue
+        with open(file_path, "r", encoding="utf-8") as f:
+            lines = f.readlines()
+        for line in lines:
+            stripped = line.strip()
+            if not stripped or stripped.lower().endswith("leaderboard"):
+                continue
+            parsed = parse_leaderboard_line(stripped, win_rate=win_rate)
+            if not parsed:
+                continue
+            name, _value, discord_id = parsed
+            if discord_id and discord_id == user_id_str:
+                return name
+    return None
 
 STATS_ELO_LEADERBOARD_NOTE = (
     "*Play at least one set to be ranked on the Elo leaderboard.*"
@@ -88,7 +253,7 @@ class StatsView(discord.ui.LayoutView):
                 pass
 
 
-class StatsCog(commands.Cog):
+class StatsCog(commands.GroupCog, name="stats", description="View player statistics."):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
 
@@ -148,6 +313,8 @@ class StatsCog(commands.Cog):
         else:
             tail = STATS_ELO_LEADERBOARD_NOTE
 
+        daily_streak = get_effective_daily_streak(cursor, user_id)
+
         body = (
             f"## Player Statistics\n"
             f"{header}\n"
@@ -155,7 +322,7 @@ class StatsCog(commands.Cog):
             f"{league_line}\n"
             f"🏆 Games Won: {games_won}\n"
             f"💀 Games Lost: {games_lost}\n"
-            f"🎮 Monthly Games: {games_played_this_month}\n"
+            f"🎮 Monthly Games: {games_played_this_month} (Daily Streak: {daily_streak})\n"
             f"📊 Win Rate: {win_rate:.2f}% (Win Streak: {win_streak})\n"
             f"{tail}"
         )
@@ -360,7 +527,328 @@ class StatsCog(commands.Cog):
         with db_connection(ctx.guild.id) as (conn, cursor):
             await self._stats_impl(ctx, cursor, user, search_name, target, had_target)
 
-    @app_commands.command(name="stats", description="View player statistics.")
+    async def _stats_expanded_impl(
+        self, ctx: commands.Context, args: typing.Optional[str]
+    ) -> None:
+        if not args or not args.strip():
+            await ctx.send(
+                embed=discord.Embed(
+                    title="Missing Input",
+                    description=(
+                        "Please provide at least one season, e.g. "
+                        "`/stats expanded seasons: s1m1m2 s2m2 s3m1m2m3`."
+                    ),
+                    color=discord.Color.red(),
+                )
+            )
+            return
+
+        groups = _parse_expanded_args(args)
+        if groups is None:
+            await ctx.send(
+                embed=discord.Embed(
+                    title="Invalid Input",
+                    description=(
+                        "Could not parse your input. Each entry must look like "
+                        "`s<season>` or `s<season>m<month>m<month>...`, e.g. "
+                        "`s1m1m2 s2m2 s3m1m2m3`."
+                    ),
+                    color=discord.Color.red(),
+                )
+            )
+            return
+        if not groups:
+            await ctx.send(
+                embed=discord.Embed(
+                    title="Missing Input",
+                    description=(
+                        "Please provide at least one season, e.g. "
+                        "`/stats expanded seasons: s1m1m2 s2m2 s3m1m2m3`."
+                    ),
+                    color=discord.Color.red(),
+                )
+            )
+            return
+
+        guild_id = ctx.guild.id
+
+        base = get_lb_root(guild_id)
+        if not os.path.isdir(base):
+            await ctx.send(
+                embed=discord.Embed(
+                    title="Error",
+                    description=(
+                        f"No leaderboard archive found for this server "
+                        f"(`{base.replace(os.sep, '/')}/`)."
+                    ),
+                    color=discord.Color.red(),
+                )
+            )
+            return
+
+        with db_connection(guild_id) as (conn, cursor):
+            cursor.execute(
+                "SELECT name FROM players WHERE id = ?", (str(ctx.author.id),)
+            )
+            row = cursor.fetchone()
+
+        if row:
+            player_name = row[0]
+        else:
+            # Not currently registered: fall back to the name recorded in
+            # the archive (matched by Discord ID) for the first season/month
+            # mentioned in the command, so past players still resolve.
+            first_season, first_months = groups[0]
+            first_season_dir = _resolve_season_dir(base, first_season)
+            lookup_dir = None
+            if first_season_dir is not None:
+                lookup_dir = (
+                    _resolve_month_dir(first_season_dir, first_months[0])
+                    if first_months
+                    else _resolve_overall_dir(first_season_dir)
+                )
+            player_name = _find_player_name_in_archive(lookup_dir, ctx.author.id)
+
+            if not player_name:
+                await ctx.send(
+                    embed=discord.Embed(
+                        title="Player Not Registered",
+                        description="You are not registered. Use `-register <name>` to sign up!",
+                        color=discord.Color.red(),
+                    )
+                )
+                return
+
+        player_name_lower = player_name.lower()
+
+        max_month = get_max_month(guild_id)
+
+        # Resolve every group into either a single "Overall" directory, or
+        # one directory per requested month.
+        resolved_entries: list[tuple[str, list[str], bool]] = []
+        for season, months in groups:
+            season_dir = _resolve_season_dir(base, season)
+            if season_dir is None:
+                await ctx.send(
+                    embed=discord.Embed(
+                        title="Data Not Found",
+                        description=f"No matching data found for Season {season}.",
+                        color=discord.Color.red(),
+                    )
+                )
+                return
+
+            # No months given for this season -> use the Overall folder.
+            use_overall = not months
+            # Months given cover the server's entire configured month range
+            # -> also use Overall instead of averaging each month.
+            if (
+                not use_overall
+                and max_month is not None
+                and sorted(set(months)) == list(range(1, max_month + 1))
+            ):
+                use_overall = True
+
+            if use_overall:
+                overall_dir = _resolve_overall_dir(season_dir)
+                if overall_dir is None:
+                    await ctx.send(
+                        embed=discord.Embed(
+                            title="Data Not Found",
+                            description=(
+                                f"No matching data found for Season {season}, Overall."
+                            ),
+                            color=discord.Color.red(),
+                        )
+                    )
+                    return
+                resolved_entries.append((f"S{season}Overall", [overall_dir], True))
+                continue
+
+            month_dirs = []
+            for month in months:
+                month_dir = _resolve_month_dir(season_dir, month)
+                if month_dir is None:
+                    await ctx.send(
+                        embed=discord.Embed(
+                            title="Data Not Found",
+                            description=(
+                                f"No matching data found for Season {season}, "
+                                f"Month {month}."
+                            ),
+                            color=discord.Color.red(),
+                        )
+                    )
+                    return
+                month_dirs.append(month_dir)
+
+            label = f"S{season}" + "".join(f"M{m}" for m in months)
+            resolved_entries.append((label, month_dirs, False))
+
+        # A single season resolving to exactly one directory - either one
+        # exact month, or the season collapsing to Overall - shows the full
+        # stats for that month/Overall instead of an averaged summary.
+        if len(resolved_entries) == 1 and len(resolved_entries[0][1]) == 1:
+            label, dirs, is_overall = resolved_entries[0]
+            dir_path = dirs[0]
+
+            elo = _read_player_stat(dir_path, "data.txt", player_name_lower)
+            wins = _read_player_stat(dir_path, "w.txt", player_name_lower)
+            losses = _read_player_stat(dir_path, "l.txt", player_name_lower)
+            win_rate = _read_player_stat(
+                dir_path, "wr.txt", player_name_lower, win_rate=True
+            )
+            games = (
+                None
+                if is_overall
+                else _read_player_stat(dir_path, "games.txt", player_name_lower)
+            )
+
+            if (
+                elo is None
+                and wins is None
+                and losses is None
+                and win_rate is None
+                and games is None
+            ):
+                await ctx.send(
+                    embed=discord.Embed(
+                        title="Data Not Found",
+                        description=(
+                            f"No matching data found for **{player_name}** in the "
+                            "requested Season/Month."
+                        ),
+                        color=discord.Color.red(),
+                    )
+                )
+                return
+
+            def _rank(filename: str, value, *, win_rate_stat: bool = False) -> str:
+                if value is None:
+                    return ""
+                r = _get_rank_for_stat(dir_path, filename, value, win_rate=win_rate_stat)
+                return f" (#{r})" if r is not None else ""
+
+            elo_line = (
+                f"🔥 Elo: {elo}{_rank('data.txt', elo)}" if elo is not None else "🔥 Elo: -"
+            )
+            wins_line = (
+                f"🏆 Wins: {wins}{_rank('w.txt', wins)}" if wins is not None else "🏆 Wins: -"
+            )
+            losses_line = (
+                f"💀 Losses: {losses}{_rank('l.txt', losses)}"
+                if losses is not None
+                else "💀 Losses: -"
+            )
+            win_rate_line = (
+                f"📊 Win Rate: {win_rate:.2f}%{_rank('wr.txt', win_rate, win_rate_stat=True)}"
+                if win_rate is not None
+                else "📊 Win Rate: -"
+            )
+
+            body_lines = [
+                "## Player Statistics",
+                f"**{player_name} - {label}**",
+                elo_line,
+                wins_line,
+                losses_line,
+            ]
+            if not is_overall:
+                games_line = (
+                    f"🎮 Monthly Games: {games}{_rank('games.txt', games)}"
+                    if games is not None
+                    else "🎮 Monthly Games: -"
+                )
+                body_lines.append(games_line)
+            body_lines.append(win_rate_line)
+
+            embed = discord.Embed(description="\n".join(body_lines), color=ACCENT_COLOR)
+            avatar_url = await self._get_display_avatar_url(ctx, ctx.author, ctx.author.id)
+            if avatar_url:
+                embed.set_thumbnail(url=avatar_url)
+            await ctx.send(embed=embed)
+            return
+
+        # Otherwise: several season/month entries were requested -> average
+        # Elo and Win Rate, sum Wins and Losses across all of them.
+        all_dirs = [d for _, dirs, _ in resolved_entries for d in dirs]
+
+        elo_values: list[float] = []
+        wins_total = 0
+        losses_total = 0
+        win_rate_values: list[float] = []
+        any_data_found = False
+
+        for dir_path in all_dirs:
+            elo = _read_player_stat(
+                dir_path, EXPANDED_FILE_MAP["elo"], player_name_lower
+            )
+            wins = _read_player_stat(
+                dir_path, EXPANDED_FILE_MAP["wins"], player_name_lower
+            )
+            losses = _read_player_stat(
+                dir_path, EXPANDED_FILE_MAP["losses"], player_name_lower
+            )
+            win_rate = _read_player_stat(
+                dir_path, EXPANDED_FILE_MAP["win_rate"], player_name_lower, win_rate=True
+            )
+
+            if elo is not None:
+                elo_values.append(elo)
+                any_data_found = True
+            if wins is not None:
+                wins_total += wins
+                any_data_found = True
+            if losses is not None:
+                losses_total += losses
+                any_data_found = True
+            if win_rate is not None:
+                win_rate_values.append(win_rate)
+                any_data_found = True
+
+        if not any_data_found:
+            await ctx.send(
+                embed=discord.Embed(
+                    title="Data Not Found",
+                    description=(
+                        f"No matching data found for **{player_name}** in the "
+                        "requested Season(s)/Month(s)."
+                    ),
+                    color=discord.Color.red(),
+                )
+            )
+            return
+
+        elo_avg = sum(elo_values) / len(elo_values) if elo_values else None
+        win_rate_avg = (
+            sum(win_rate_values) / len(win_rate_values) if win_rate_values else None
+        )
+
+        suffix = " + ".join(label for label, _, _ in resolved_entries)
+
+        elo_line = f"🔥 Elo: {elo_avg:.2f}" if elo_avg is not None else "🔥 Elo: -"
+        win_rate_line = (
+            f"📊 Win Rate: {win_rate_avg:.2f}%"
+            if win_rate_avg is not None
+            else "📊 Win Rate: -"
+        )
+
+        body = (
+            f"## Player Statistics\n"
+            f"**{player_name} - {suffix}**\n"
+            f"{elo_line}\n"
+            f"🏆 Wins: {wins_total}\n"
+            f"💀 Losses: {losses_total}\n"
+            f"{win_rate_line}"
+        )
+
+        embed = discord.Embed(description=body, color=ACCENT_COLOR)
+        avatar_url = await self._get_display_avatar_url(ctx, ctx.author, ctx.author.id)
+        if avatar_url:
+            embed.set_thumbnail(url=avatar_url)
+        await ctx.send(embed=embed)
+
+    @app_commands.command(name="view", description="View player statistics.")
     @app_commands.describe(
         name="Player's registered name.",
         mention="Player to mention.",
@@ -419,6 +907,27 @@ class StatsCog(commands.Cog):
 
         with db_connection(interaction.guild.id) as (conn, cursor):
             await self._stats_impl(ctx, cursor, user, search_name, target_text, had_target)
+
+    @app_commands.command(
+        name="expanded",
+        description="View your averaged stats across one or more season/month combinations.",
+    )
+    @app_commands.describe(
+        seasons=(
+            "Season and month entries, e.g. `s1m1m2 s2m2 s3m1m2m3` for "
+            "Season 1 months 1-2, Season 2 month 2, Season 3 months 1-3. "
+            "A season with no `m` part (e.g. `s2`) gives that season's "
+            "Overall stats."
+        ),
+    )
+    @app_commands.guild_only()
+    async def slash_stats_expanded(
+        self,
+        interaction: discord.Interaction,
+        seasons: str,
+    ):
+        ctx = SlashContext(interaction)
+        await self._stats_expanded_impl(ctx, seasons)
 
     async def _stats_impl(
         self,

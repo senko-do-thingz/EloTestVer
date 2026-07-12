@@ -3,6 +3,10 @@ import os
 import re
 import sqlite3
 from contextlib import contextmanager
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from datetime import date, datetime
 
 DB_FOLDER = "databases"
 
@@ -60,6 +64,32 @@ def get_db_path(guild_id: int | str) -> str:
                                 return path
 
     return os.path.join(DB_FOLDER, f"{guild_id_str}.db")
+
+
+def list_all_db_paths() -> list[str]:
+    """Every guild database file discovered under DB_FOLDER (both the
+    ``databases/<guild_id>.db`` / ``databases/c_<guild_id>.db`` layout and
+    the ``databases/<guild_id>/*.db`` subfolder layout).
+
+    Used by the scheduled daily-streak refresh task to reach every guild's
+    database directly by path, without needing to resolve each one through
+    a live guild_id (some guild dbs may belong to servers the bot isn't
+    currently a member of, e.g. the dev-mode / cross-server admin tools).
+    """
+    paths: list[str] = []
+    if not os.path.isdir(DB_FOLDER):
+        return paths
+    for entry in sorted(os.listdir(DB_FOLDER)):
+        full = os.path.join(DB_FOLDER, entry)
+        if os.path.isfile(full) and entry.endswith(".db"):
+            paths.append(full)
+        elif os.path.isdir(full):
+            for name in sorted(os.listdir(full)):
+                if name.endswith(".db"):
+                    sub_path = os.path.join(full, name)
+                    if os.path.isfile(sub_path):
+                        paths.append(sub_path)
+    return paths
 
 
 def db_exists(guild_id: int | str) -> bool:
@@ -134,6 +164,24 @@ def _run_migrations(conn: sqlite3.Connection, cursor: sqlite3.Cursor) -> None:
         """
     )
 
+    # daily_streaks is intentionally a separate table, keyed by Discord player
+    # id and NOT a foreign key of players.id / not touched by "DELETE FROM
+    # players" (-c_reg's unregister-everyone wipe). Unlike every other stat
+    # (elo, wins, win_streak, ...), which is tied to a *registration* and is
+    # expected to reset when a player unregisters, daily streak is meant to
+    # track a Discord user's real-world play activity across
+    # unregister/re-register cycles, so it survives -c_reg on purpose.
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS daily_streaks (
+            player_id TEXT PRIMARY KEY,
+            daily_streak INTEGER DEFAULT 0,
+            highest_daily_streak INTEGER DEFAULT 0,
+            last_played_date TEXT DEFAULT NULL
+        )
+        """
+    )
+
     cursor.execute(
         """
         CREATE TABLE IF NOT EXISTS settings (
@@ -181,11 +229,58 @@ def _run_migrations(conn: sqlite3.Connection, cursor: sqlite3.Cursor) -> None:
     _safe_alter(cursor, "ALTER TABLE settings ADD COLUMN log_channel_id INTEGER DEFAULT NULL")
     _safe_alter(cursor, "ALTER TABLE players ADD COLUMN win_streak INTEGER DEFAULT 0")
     _safe_alter(cursor, "ALTER TABLE players ADD COLUMN highest_win_streak INTEGER DEFAULT 0")
+    # One-time cleanup: earlier dev builds briefly added daily_streak columns
+    # directly on players before this was split into its own table. Drop them
+    # if present so stale per-registration data doesn't linger unused.
+    for _col in ("daily_streak", "highest_daily_streak", "last_played_date"):
+        try:
+            cursor.execute(f"ALTER TABLE players DROP COLUMN {_col}")
+        except sqlite3.OperationalError:
+            pass
     _safe_alter(cursor, "ALTER TABLE settings ADD COLUMN max_month INTEGER DEFAULT NULL")
     _safe_alter(cursor, "ALTER TABLE settings ADD COLUMN current_season INTEGER DEFAULT 1")
     _safe_alter(cursor, "ALTER TABLE settings ADD COLUMN current_month INTEGER DEFAULT 1")
     _safe_alter(cursor, "ALTER TABLE match_history ADD COLUMN season INTEGER DEFAULT NULL")
     _safe_alter(cursor, "ALTER TABLE match_history ADD COLUMN month INTEGER DEFAULT NULL")
+    _safe_alter(cursor, "ALTER TABLE settings ADD COLUMN support_channel_id INTEGER DEFAULT NULL")
+    _safe_alter(cursor, "ALTER TABLE settings ADD COLUMN decay_log_channel_id INTEGER DEFAULT NULL")
+    _safe_alter(cursor, "ALTER TABLE settings ADD COLUMN nickname TEXT DEFAULT NULL")
+
+    # support_threads: maps a DM support user to the thread created for them
+    # under the configured support channel (see -support / /msg). Keyed by
+    # (guild_id, user_id) so the same physical database layout used
+    # elsewhere still applies even though this feature is only ever used on
+    # the private/management guild's database.
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS support_threads (
+            guild_id INTEGER NOT NULL,
+            user_id INTEGER NOT NULL,
+            thread_id INTEGER NOT NULL,
+            PRIMARY KEY (guild_id, user_id)
+        )
+        """
+    )
+    # notify_message_id: the last "your message has been sent" receipt the
+    # bot sent this user in DMs. Replying to that specific message lets the
+    # user continue the conversation without re-running /msg (see cogs/msg.py).
+    _safe_alter(
+        cursor, "ALTER TABLE support_threads ADD COLUMN notify_message_id INTEGER DEFAULT NULL"
+    )
+
+    # msg_bans: users blocked from using /msg, with the reason given by the
+    # admin who ran -ban_msg. Keyed by (guild_id, user_id) like
+    # support_threads, always looked up against PRIVATE_GUILD_ID.
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS msg_bans (
+            guild_id INTEGER NOT NULL,
+            user_id INTEGER NOT NULL,
+            reason TEXT NOT NULL,
+            PRIMARY KEY (guild_id, user_id)
+        )
+        """
+    )
 
     conn.commit()
 
@@ -278,6 +373,176 @@ def get_win_streak(cursor, player_id: str | int) -> tuple[int, int]:
     if not row:
         return 0, 0
     return (row[0] or 0), (row[1] or 0)
+
+
+# ---------------------------------------------------------------------------
+# Daily streak helpers
+#
+# Daily streak tracks how many consecutive calendar days (UTC) in a row a
+# player has played at least one set. It never affects Elo math. Every time
+# a match is reported, both players' daily streak is updated:
+# - Same UTC day as their last played date -> no change (already counted).
+# - Exactly one UTC day after their last played date -> streak +1.
+# - Any other gap (or first ever match) -> streak resets to 1.
+# The highest streak ever reached is kept separately, same pattern as
+# highest_win_streak.
+#
+# Unlike win_streak, this lives in its own daily_streaks table (keyed by
+# Discord player id, not a foreign key of players.id) so it survives
+# -c_reg / unregistering - it tracks a Discord user's activity, not a
+# registration's stats.
+# ---------------------------------------------------------------------------
+
+def apply_daily_streak(
+    cursor, player_id: str | int, played_at: "datetime" = None
+) -> tuple[int, int]:
+    """Update a player's current/highest daily streak after a match is played.
+
+    Returns the (daily_streak, highest_daily_streak) tuple after the update.
+    """
+    from datetime import datetime, timezone
+
+    if played_at is None:
+        played_at = datetime.now(timezone.utc)
+    today = played_at.strftime("%Y-%m-%d")
+
+    cursor.execute(
+        "SELECT daily_streak, highest_daily_streak, last_played_date FROM daily_streaks WHERE player_id=?",
+        (str(player_id),),
+    )
+    row = cursor.fetchone()
+    current = row[0] if row and row[0] is not None else 0
+    highest = row[1] if row and row[1] is not None else 0
+    last_played_date = row[2] if row else None
+
+    if last_played_date == today:
+        # Already played today - streak already accounted for.
+        pass
+    else:
+        if last_played_date is not None:
+            last_date = datetime.strptime(last_played_date, "%Y-%m-%d")
+            day_gap = (played_at.date() - last_date.date()).days
+        else:
+            day_gap = None
+
+        if day_gap == 1:
+            current += 1
+        else:
+            current = 1
+        highest = max(highest, current)
+
+    cursor.execute(
+        """
+        INSERT INTO daily_streaks (player_id, daily_streak, highest_daily_streak, last_played_date)
+        VALUES (?, ?, ?, ?)
+        ON CONFLICT(player_id) DO UPDATE SET
+            daily_streak = excluded.daily_streak,
+            highest_daily_streak = excluded.highest_daily_streak,
+            last_played_date = excluded.last_played_date
+        """,
+        (str(player_id), current, highest, today),
+    )
+    return current, highest
+
+
+def get_daily_streak(cursor, player_id: str | int) -> tuple[int, int]:
+    """Return (daily_streak, highest_daily_streak) for a player, defaulting to (0, 0)."""
+    cursor.execute(
+        "SELECT daily_streak, highest_daily_streak FROM daily_streaks WHERE player_id=?",
+        (str(player_id),),
+    )
+    row = cursor.fetchone()
+    if not row:
+        return 0, 0
+    return (row[0] or 0), (row[1] or 0)
+
+
+def get_effective_daily_streak(cursor, player_id: str | int) -> int:
+    """Return the player's daily streak as it should be *displayed* right now.
+
+    The stored ``daily_streak`` value is only updated when a match is
+    reported, so a player who missed a day without playing would still show
+    their old streak until their next match. This lazily zeroes the streak
+    out (without needing a background/cron task) once more than one UTC day
+    has passed since they last played: still within the grace period (played
+    yesterday, haven't played yet today) shows the stored value; missing a
+    full day shows 0.
+    """
+    from datetime import datetime, timezone
+
+    cursor.execute(
+        "SELECT daily_streak, last_played_date FROM daily_streaks WHERE player_id=?",
+        (str(player_id),),
+    )
+    row = cursor.fetchone()
+    if not row or not row[1]:
+        return 0
+
+    streak = row[0] or 0
+    last_date = datetime.strptime(row[1], "%Y-%m-%d").date()
+    today = datetime.now(timezone.utc).date()
+    day_gap = (today - last_date).days
+
+    if day_gap > 1:
+        return 0
+    return streak
+
+
+def refresh_daily_streaks_for_db(db_path: str, *, today: "date | None" = None) -> int:
+    """Zero out ``daily_streak`` for every player in one guild database whose
+    streak is stale - i.e. they didn't play at all on the UTC day right
+    before ``today``. Returns the number of rows reset.
+
+    This is the durable counterpart to ``get_effective_daily_streak()``
+    (which only *displays* a stale streak as 0 without touching the
+    database). It's meant to be called once a day, right after UTC
+    midnight, by the scheduled task in cogs/daily_streak_refresh.py - see
+    ``refresh_all_daily_streaks()`` below, which runs this across every
+    guild database.
+    """
+    from datetime import datetime, timedelta, timezone
+
+    if today is None:
+        today = datetime.now(timezone.utc).date()
+    # Any daily_streaks row whose last_played_date is older than yesterday
+    # means the player missed an entire UTC day without playing - reset it.
+    # A last_played_date of exactly yesterday is still within the grace
+    # period (they have all of "today" left to keep the streak alive).
+    threshold = (today - timedelta(days=1)).isoformat()
+
+    conn = sqlite3.connect(db_path)
+    try:
+        cursor = conn.cursor()
+        cursor.execute(
+            "UPDATE daily_streaks SET daily_streak = 0 "
+            "WHERE last_played_date < ? AND daily_streak != 0",
+            (threshold,),
+        )
+        reset_count = cursor.rowcount if cursor.rowcount and cursor.rowcount > 0 else 0
+        conn.commit()
+        return reset_count
+    except sqlite3.OperationalError:
+        # daily_streaks table doesn't exist in this db yet (e.g. a very old
+        # db file that was never touched after this feature was added) -
+        # nothing to refresh.
+        return 0
+    finally:
+        conn.close()
+
+
+def refresh_all_daily_streaks() -> tuple[int, int]:
+    """Run ``refresh_daily_streaks_for_db()`` across every guild database
+    found under DB_FOLDER. Returns (databases_processed, total_rows_reset).
+    """
+    from datetime import datetime, timezone
+
+    today = datetime.now(timezone.utc).date()
+    dbs_processed = 0
+    total_reset = 0
+    for path in list_all_db_paths():
+        dbs_processed += 1
+        total_reset += refresh_daily_streaks_for_db(path, today=today)
+    return dbs_processed, total_reset
 
 
 # ---------------------------------------------------------------------------
@@ -412,3 +677,222 @@ def set_log_channel_id(guild_id: int, channel_id: int | None) -> None:
             (guild_id, channel_id),
         )
         conn.commit()
+
+
+# ---------------------------------------------------------------------------
+# Support channel / thread mapping helpers (-support, /msg)
+# ---------------------------------------------------------------------------
+
+def get_support_channel_id(guild_id: int) -> int | None:
+    """Return the configured destination channel for DM support relays."""
+    with db_connection(guild_id) as (conn, cursor):
+        cursor.execute(
+            "SELECT support_channel_id FROM settings WHERE guild_id=?", (guild_id,)
+        )
+        row = cursor.fetchone()
+        return row[0] if row and row[0] is not None else None
+
+
+def set_support_channel_id(guild_id: int, channel_id: int | None) -> None:
+    with db_connection(guild_id) as (conn, cursor):
+        cursor.execute(
+            """
+            INSERT INTO settings (guild_id, support_channel_id)
+            VALUES (?, ?)
+            ON CONFLICT(guild_id) DO UPDATE SET support_channel_id = excluded.support_channel_id
+            """,
+            (guild_id, channel_id),
+        )
+        conn.commit()
+
+
+def get_support_thread_id(guild_id: int, user_id: int) -> int | None:
+    """Return the thread ID previously created for this user's DM support
+    conversation, or None if no thread has been created yet."""
+    with db_connection(guild_id) as (conn, cursor):
+        cursor.execute(
+            "SELECT thread_id FROM support_threads WHERE guild_id=? AND user_id=?",
+            (guild_id, user_id),
+        )
+        row = cursor.fetchone()
+        return row[0] if row else None
+
+
+def set_support_thread_id(guild_id: int, user_id: int, thread_id: int) -> None:
+    with db_connection(guild_id) as (conn, cursor):
+        cursor.execute(
+            """
+            INSERT INTO support_threads (guild_id, user_id, thread_id)
+            VALUES (?, ?, ?)
+            ON CONFLICT(guild_id, user_id) DO UPDATE SET thread_id = excluded.thread_id
+            """,
+            (guild_id, user_id, thread_id),
+        )
+        conn.commit()
+
+
+def get_support_user_id_by_thread(guild_id: int, thread_id: int) -> int | None:
+    """Reverse of get_support_thread_id: given a support thread, return the
+    ID of the user it was created for, or None if it isn't a known support
+    thread. Used to relay staff replies in the thread back to the user."""
+    with db_connection(guild_id) as (conn, cursor):
+        cursor.execute(
+            "SELECT user_id FROM support_threads WHERE guild_id=? AND thread_id=?",
+            (guild_id, thread_id),
+        )
+        row = cursor.fetchone()
+        return row[0] if row else None
+
+
+def get_msg_ban_reason(guild_id: int, user_id: int) -> str | None:
+    """Return the reason this user was banned from /msg, or None if they
+    aren't currently banned."""
+    with db_connection(guild_id) as (conn, cursor):
+        cursor.execute(
+            "SELECT reason FROM msg_bans WHERE guild_id=? AND user_id=?",
+            (guild_id, user_id),
+        )
+        row = cursor.fetchone()
+        return row[0] if row else None
+
+
+def set_msg_ban(guild_id: int, user_id: int, reason: str) -> None:
+    """Ban a user from using /msg (see -ban_msg)."""
+    with db_connection(guild_id) as (conn, cursor):
+        cursor.execute(
+            """
+            INSERT INTO msg_bans (guild_id, user_id, reason)
+            VALUES (?, ?, ?)
+            ON CONFLICT(guild_id, user_id) DO UPDATE SET reason = excluded.reason
+            """,
+            (guild_id, user_id, reason),
+        )
+        conn.commit()
+
+
+def clear_msg_ban(guild_id: int, user_id: int) -> bool:
+    """Unban a user from /msg (see -unban_msg). Returns True if they were
+    actually banned, False if there was nothing to clear."""
+    with db_connection(guild_id) as (conn, cursor):
+        cursor.execute(
+            "DELETE FROM msg_bans WHERE guild_id=? AND user_id=?",
+            (guild_id, user_id),
+        )
+        conn.commit()
+        return cursor.rowcount > 0
+
+
+def get_support_notify_message_id(guild_id: int, user_id: int) -> int | None:
+    """Return the ID of the last support "message sent" receipt the bot sent
+    this user, or None if there isn't one yet. Used to check whether an
+    incoming DM reply is continuing that conversation."""
+    with db_connection(guild_id) as (conn, cursor):
+        cursor.execute(
+            "SELECT notify_message_id FROM support_threads WHERE guild_id=? AND user_id=?",
+            (guild_id, user_id),
+        )
+        row = cursor.fetchone()
+        return row[0] if row and row[0] is not None else None
+
+
+def set_support_notify_message_id(guild_id: int, user_id: int, message_id: int | None) -> None:
+    """Remember the receipt message so a later reply to it can be relayed.
+    Pass message_id=None to clear it (e.g. once the 30-minute session
+    times out), so a stray reply to the old receipt no longer relays.
+    Requires a support_threads row to already exist (i.e. a thread was
+    already created for this user), since it just updates that row."""
+    with db_connection(guild_id) as (conn, cursor):
+        cursor.execute(
+            """
+            UPDATE support_threads SET notify_message_id = ?
+            WHERE guild_id = ? AND user_id = ?
+            """,
+            (message_id, guild_id, user_id),
+        )
+        conn.commit()
+
+
+# ---------------------------------------------------------------------------
+# Decay log channel helper (-decay_setup)
+# ---------------------------------------------------------------------------
+
+def get_decay_log_channel_id(guild_id: int) -> int | None:
+    """Return the per-server channel where automatic monthly -decay change
+    logs are posted, or None if -decay_setup was never run on this server."""
+    with db_connection(guild_id) as (conn, cursor):
+        cursor.execute(
+            "SELECT decay_log_channel_id FROM settings WHERE guild_id=?", (guild_id,)
+        )
+        row = cursor.fetchone()
+        return row[0] if row and row[0] is not None else None
+
+
+def set_decay_log_channel_id(guild_id: int, channel_id: int | None) -> None:
+    with db_connection(guild_id) as (conn, cursor):
+        cursor.execute(
+            """
+            INSERT INTO settings (guild_id, decay_log_channel_id)
+            VALUES (?, ?)
+            ON CONFLICT(guild_id) DO UPDATE SET decay_log_channel_id = excluded.decay_log_channel_id
+            """,
+            (guild_id, channel_id),
+        )
+        conn.commit()
+
+
+# ---------------------------------------------------------------------------
+# Server nickname helper (-nickname)
+#
+# Used purely for naming files sent by -get_lb, -sum_lb and the automatic
+# -decay task, so archives are easier to tell apart than a raw server ID.
+# ---------------------------------------------------------------------------
+
+def get_nickname(guild_id: int) -> str | None:
+    with db_connection(guild_id) as (conn, cursor):
+        cursor.execute("SELECT nickname FROM settings WHERE guild_id=?", (guild_id,))
+        row = cursor.fetchone()
+        return row[0] if row and row[0] else None
+
+
+def set_nickname(guild_id: int, name: str) -> None:
+    with db_connection(guild_id) as (conn, cursor):
+        cursor.execute(
+            """
+            INSERT INTO settings (guild_id, nickname)
+            VALUES (?, ?)
+            ON CONFLICT(guild_id) DO UPDATE SET nickname = excluded.nickname
+            """,
+            (guild_id, name),
+        )
+        conn.commit()
+
+
+# ---------------------------------------------------------------------------
+# Guild-id enumeration, used by the automatic monthly -decay task to walk
+# every known guild database (mirrors list_all_db_paths()'s file discovery,
+# but returns the guild id instead of the file path).
+# ---------------------------------------------------------------------------
+
+def list_all_guild_ids() -> list[int]:
+    """Return every guild ID discovered under DB_FOLDER (both the
+    ``databases/<guild_id>.db`` / ``databases/c_<guild_id>.db`` layout and
+    the ``databases/<guild_id>/*.db`` subfolder layout), based on
+    list_all_db_paths()'s file discovery.
+
+    Used by the automatic monthly -decay task to walk every known guild
+    database without needing to resolve each one through a live guild_id.
+    """
+    guild_ids: set[int] = set()
+    for path in list_all_db_paths():
+        # The guild id is either the containing subfolder's name
+        # (databases/<guild_id>/x.db) or the leading digits of the file
+        # name itself (databases/<guild_id>.db / databases/c_<guild_id>.db).
+        parent = os.path.basename(os.path.dirname(path))
+        if parent.isdigit():
+            guild_ids.add(int(parent))
+            continue
+        filename = os.path.basename(path)
+        match = re.match(r"^(?:c_)?(\d+)", filename)
+        if match:
+            guild_ids.add(int(match.group(1)))
+    return sorted(guild_ids)

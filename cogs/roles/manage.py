@@ -365,7 +365,7 @@ class RolesManageCog(RolesBaseCog):
             await self._remove_bot_reactions(message)
             await message.edit(
                 embed=discord.Embed(
-                    title="⌛ Timeout",
+                    title="Timeout",
                     description="League clear confirmation timed out. Please try again.",
                     color=discord.Color.red(),
                 )
