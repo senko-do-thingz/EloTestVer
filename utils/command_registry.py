@@ -119,11 +119,20 @@ _register_many(
         "history",
         description=(
             "Show your recent match history in a paginated image (10 matches per "
-            "page, up to 30 stored), or view another player's by mentioning them."
+            "page, all matches kept). The prefix form (`-history`) always shows "
+            "your own history for this server's current season/month. The slash "
+            "form additionally lets you view another player's history and filter "
+            "by season and/or month."
         ),
-        syntax="-history [@player]",
-        slash_syntax="/history [name:<@user>]",
-        examples=("-history", "-history @Senko", "/history name:@Senko"),
+        syntax="-history",
+        slash_syntax="/history [name:<@user>] [season:<n>] [month:<n>]",
+        examples=(
+            "-history",
+            "/history",
+            "/history name:@Senko",
+            "/history season:2",
+            "/history season:2 month:1",
+        ),
     ),
     _cmd(
         "stats",
@@ -323,6 +332,30 @@ _register_many(
         slash_syntax="/set_stats discord_id:<id> elo:<n> wins:<n> losses:<n> games_played:<n>",
         permission="Elo Bot Manager",
         examples=("-set_stats 111 600 10 5 15", "/set_stats discord_id:111 elo:600 wins:10 losses:5 games_played:15"),
+        admin=True,
+    ),
+    _cmd(
+        "months",
+        description=(
+            "Set the total number of months a season can have on this server "
+            "(admin only). Applies to /season, -decay, and /history going forward."
+        ),
+        syntax="Not available as a prefix command.",
+        slash_syntax="/months total_months:<n>",
+        permission="Elo Bot Manager",
+        examples=("/months total_months:3",),
+        admin=True,
+    ),
+    _cmd(
+        "season",
+        description=(
+            "Update the current season and month for this server (admin only). "
+            "Requires /months to be set first."
+        ),
+        syntax="Not available as a prefix command.",
+        slash_syntax="/season season:<n> month:<n>",
+        permission="Elo Bot Manager",
+        examples=("/season season:1 month:2",),
         admin=True,
     ),
     _cmd(

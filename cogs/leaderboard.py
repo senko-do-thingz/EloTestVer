@@ -7,7 +7,7 @@ from discord.ext import commands
 
 from db.elo_db import db_connection, db_exists, get_db_path
 from utils import calculate_win_rate, render_leaderboard_image
-from utils.lb_cache import get as cache_get
+from utils.lb_cache import get as cache_get, LB_TITLE_PREFIX
 import logging
 
 logger = logging.getLogger(__name__)
@@ -86,6 +86,22 @@ class NextPageButton(discord.ui.Button):
         await self.custom_view.update_leaderboard(interaction)
 
 
+class LeaderboardMyRankButton(discord.ui.Button):
+    def __init__(self, custom_view):
+        super().__init__(style=discord.ButtonStyle.secondary, label="My Rank")
+        self.custom_view = custom_view
+
+    async def callback(self, interaction: discord.Interaction):
+        # Only the user who ran the command can use this button.
+        if interaction.user.id != self.custom_view.ctx.author.id:
+            await interaction.response.send_message(
+                "You cannot perform this action.", ephemeral=True
+            )
+            return
+        self.custom_view.jump_to_target = True
+        await self.custom_view.update_leaderboard(interaction)
+
+
 class LeaderboardRefreshButton(discord.ui.Button):
     def __init__(self, custom_view):
         super().__init__(style=discord.ButtonStyle.secondary, emoji="🔄")
@@ -115,19 +131,34 @@ class LeaderboardView(discord.ui.LayoutView):
         self.page = page
         self.per_page = 10
         self.total_pages = 1
-        self.target_user_id = ctx.author.id
+        # Bug fix: `id` is a TEXT-affinity column, so SQLite always stores/
+        # returns player ids as str, even when an int was bound at INSERT.
+        # Comparing that str to a raw int ctx.author.id (as this used to do)
+        # was always False in Python, so the "highlight me" / My Rank logic
+        # never actually matched anyone. Normalize to str once here instead.
+        self.target_user_id = str(ctx.author.id)
         self.last_updated = datetime.now(timezone.utc)
         self.message = None
+        # Set by LeaderboardMyRankButton; consumed once by the next
+        # _render_leaderboard() call to jump to the page the user is on.
+        self.jump_to_target = False
 
         # Interactive items are created once and keep the same instance across
         # each layout re-render (only their attachment point in the row/container changes).
         self.dropdown = LeaderboardDropdown(self)
         self.prev_button = PreviousPageButton(self)
         self.next_button = NextPageButton(self)
+        self.my_rank_button = LeaderboardMyRankButton(self)
         self.refresh_button = LeaderboardRefreshButton(self)
 
     async def on_timeout(self) -> None:
-        for item in (self.dropdown, self.prev_button, self.next_button, self.refresh_button):
+        for item in (
+            self.dropdown,
+            self.prev_button,
+            self.next_button,
+            self.my_rank_button,
+            self.refresh_button,
+        ):
             item.disabled = True
         if self.message:
             try:
@@ -136,7 +167,7 @@ class LeaderboardView(discord.ui.LayoutView):
                 pass
 
     def _title_prefix(self) -> str:
-        return "Leaderboard - "
+        return LB_TITLE_PREFIX
 
     def _dev_note(self, note_text: str | None) -> str | None:
         if self.db_guild_id != self.ctx.guild.id:
@@ -163,7 +194,9 @@ class LeaderboardView(discord.ui.LayoutView):
         self.add_item(container)
 
         self.add_item(discord.ui.ActionRow(self.dropdown))
-        self.add_item(discord.ui.ActionRow(self.prev_button, self.next_button))
+        self.add_item(
+            discord.ui.ActionRow(self.prev_button, self.next_button, self.my_rank_button)
+        )
 
     async def update_leaderboard(self, interaction_or_ctx):
         with db_connection(self.db_guild_id) as (conn, cursor):
@@ -285,6 +318,29 @@ class LeaderboardView(discord.ui.LayoutView):
                 await interaction_or_ctx.send(embed=embed)
             return
 
+        if self.jump_to_target:
+            self.jump_to_target = False
+            target_index = next(
+                (
+                    i
+                    for i, (pid, _, _) in enumerate(display_players)
+                    if str(pid) == self.target_user_id
+                ),
+                None,
+            )
+            if target_index is None:
+                embed = discord.Embed(
+                    title="Not Ranked",
+                    description="You are not currently ranked in this leaderboard category.",
+                    color=discord.Color.red(),
+                )
+                if isinstance(interaction_or_ctx, discord.Interaction):
+                    await interaction_or_ctx.response.send_message(embed=embed, ephemeral=True)
+                else:
+                    await interaction_or_ctx.send(embed=embed)
+                return
+            self.page = target_index // self.per_page
+
         self.total_pages = max(1, (len(display_players) - 1) // self.per_page + 1)
         if self.page >= self.total_pages:
             self.page = self.total_pages - 1
@@ -292,11 +348,18 @@ class LeaderboardView(discord.ui.LayoutView):
         end = start + self.per_page
         page_players = display_players[start:end]
 
-        # Check whether the user is on this page (to highlight them)
-        target_in_page = any(pid == self.target_user_id for pid, _, _ in page_players)
+        # Check whether the user is on this page (to highlight them). Cast
+        # pid to str defensively - legacy rows inserted before the id column
+        # settled on TEXT affinity could otherwise come back as int and
+        # silently fail this comparison, which used to suppress the
+        # highlight and (incorrectly) allow the cached, unhighlighted image
+        # to be served instead.
+        target_in_page = any(str(pid) == self.target_user_id for pid, _, _ in page_players)
 
         self.prev_button.disabled = self.page == 0
         self.next_button.disabled = self.page >= self.total_pages - 1
+        # Grey out My Rank once the invoker's own row is already visible.
+        self.my_rank_button.disabled = target_in_page
 
         filename = "leaderboard.png"
 
@@ -333,7 +396,7 @@ class LeaderboardView(discord.ui.LayoutView):
         for i, (pid, name, stat) in enumerate(page_players):
             rank = start + i + 1
             stat_str = f"{stat:.2f}" if self.category == "win_rate" else str(stat)
-            entries.append((rank, name, stat_str, pid == self.target_user_id))
+            entries.append((rank, name, stat_str, str(pid) == self.target_user_id))
 
         buf = render_leaderboard_image(
             entries,

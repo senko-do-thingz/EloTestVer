@@ -141,7 +141,10 @@ def _run_migrations(conn: sqlite3.Connection, cursor: sqlite3.Cursor) -> None:
             language TEXT DEFAULT 'en',
             dev_mode INTEGER DEFAULT 0,
             league_announce_channel_id INTEGER DEFAULT NULL,
-            league_announce_channel_ids TEXT DEFAULT NULL
+            league_announce_channel_ids TEXT DEFAULT NULL,
+            max_month INTEGER DEFAULT NULL,
+            current_season INTEGER DEFAULT 1,
+            current_month INTEGER DEFAULT 1
         )
         """
     )
@@ -178,6 +181,11 @@ def _run_migrations(conn: sqlite3.Connection, cursor: sqlite3.Cursor) -> None:
     _safe_alter(cursor, "ALTER TABLE settings ADD COLUMN log_channel_id INTEGER DEFAULT NULL")
     _safe_alter(cursor, "ALTER TABLE players ADD COLUMN win_streak INTEGER DEFAULT 0")
     _safe_alter(cursor, "ALTER TABLE players ADD COLUMN highest_win_streak INTEGER DEFAULT 0")
+    _safe_alter(cursor, "ALTER TABLE settings ADD COLUMN max_month INTEGER DEFAULT NULL")
+    _safe_alter(cursor, "ALTER TABLE settings ADD COLUMN current_season INTEGER DEFAULT 1")
+    _safe_alter(cursor, "ALTER TABLE settings ADD COLUMN current_month INTEGER DEFAULT 1")
+    _safe_alter(cursor, "ALTER TABLE match_history ADD COLUMN season INTEGER DEFAULT NULL")
+    _safe_alter(cursor, "ALTER TABLE match_history ADD COLUMN month INTEGER DEFAULT NULL")
 
     conn.commit()
 
@@ -270,6 +278,118 @@ def get_win_streak(cursor, player_id: str | int) -> tuple[int, int]:
     if not row:
         return 0, 0
     return (row[0] or 0), (row[1] or 0)
+
+
+# ---------------------------------------------------------------------------
+# Season / month helpers
+#
+# ``max_month`` is the total number of months a season can hold on this
+# server, set once via /months (e.g. 3 -> month 1, 2, 3 per season). Every
+# server starts at season 1, month 1 until an admin changes it with /season.
+# ---------------------------------------------------------------------------
+
+def get_max_month(guild_id: int) -> int | None:
+    """Return the configured max month per season, or None if /months was never run."""
+    with db_connection(guild_id) as (conn, cursor):
+        cursor.execute("SELECT max_month FROM settings WHERE guild_id=?", (guild_id,))
+        row = cursor.fetchone()
+        return row[0] if row and row[0] is not None else None
+
+
+def set_max_month(guild_id: int, max_month: int) -> None:
+    """Set the total number of months a season can have on this server."""
+    with db_connection(guild_id) as (conn, cursor):
+        cursor.execute(
+            """
+            INSERT INTO settings (guild_id, max_month)
+            VALUES (?, ?)
+            ON CONFLICT(guild_id) DO UPDATE SET max_month = excluded.max_month
+            """,
+            (guild_id, max_month),
+        )
+        conn.commit()
+
+
+def get_season_month(guild_id: int) -> tuple[int, int]:
+    """Return (current_season, current_month) for this server, defaulting to (1, 1)."""
+    with db_connection(guild_id) as (conn, cursor):
+        cursor.execute(
+            "SELECT current_season, current_month FROM settings WHERE guild_id=?",
+            (guild_id,),
+        )
+        row = cursor.fetchone()
+        if not row:
+            return 1, 1
+        season = row[0] if row[0] is not None else 1
+        month = row[1] if row[1] is not None else 1
+        return season, month
+
+
+def get_season_month_cursor(cursor, guild_id: int) -> tuple[int, int]:
+    """Cursor-based variant of get_season_month(), for use inside an already
+    open transaction (e.g. while reporting a match) to avoid nested connections."""
+    cursor.execute(
+        "SELECT current_season, current_month FROM settings WHERE guild_id=?",
+        (guild_id,),
+    )
+    row = cursor.fetchone()
+    if not row:
+        return 1, 1
+    season = row[0] if row[0] is not None else 1
+    month = row[1] if row[1] is not None else 1
+    return season, month
+
+
+def set_season_month(guild_id: int, season: int, month: int) -> None:
+    """Directly set the current season/month for this server (used by /season)."""
+    with db_connection(guild_id) as (conn, cursor):
+        cursor.execute(
+            """
+            INSERT INTO settings (guild_id, current_season, current_month)
+            VALUES (?, ?, ?)
+            ON CONFLICT(guild_id) DO UPDATE SET
+                current_season = excluded.current_season,
+                current_month = excluded.current_month
+            """,
+            (guild_id, season, month),
+        )
+        conn.commit()
+
+
+def advance_season_month_cursor(cursor, guild_id: int) -> tuple[int, int, int, int]:
+    """Advance the current month by 1 (used by -decay), rolling over into the
+    next season when the month would exceed the server's configured max_month.
+
+    Runs on an already-open cursor so it can be part of a larger transaction
+    (caller is responsible for committing). Returns
+    (old_season, old_month, new_season, new_month).
+    """
+    cursor.execute(
+        "SELECT max_month, current_season, current_month FROM settings WHERE guild_id=?",
+        (guild_id,),
+    )
+    row = cursor.fetchone()
+    max_month = row[0] if row and row[0] is not None else None
+    old_season = row[1] if row and row[1] is not None else 1
+    old_month = row[2] if row and row[2] is not None else 1
+
+    new_month = old_month + 1
+    new_season = old_season
+    if max_month is not None and new_month > max_month:
+        new_season += 1
+        new_month = 1
+
+    cursor.execute(
+        """
+        INSERT INTO settings (guild_id, current_season, current_month)
+        VALUES (?, ?, ?)
+        ON CONFLICT(guild_id) DO UPDATE SET
+            current_season = excluded.current_season,
+            current_month = excluded.current_month
+        """,
+        (guild_id, new_season, new_month),
+    )
+    return old_season, old_month, new_season, new_month
 
 
 def get_log_channel_id(guild_id: int) -> int | None:

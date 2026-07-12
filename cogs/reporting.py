@@ -7,7 +7,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
-from db.elo_db import db_connection, get_dev_mode, apply_win_streak
+from db.elo_db import db_connection, get_dev_mode, apply_win_streak, get_season_month_cursor
 from db.h2h_db import add_h2h_match
 from db.match_history_db import (
     add_match_history_row,
@@ -462,6 +462,7 @@ class ReportingCog(commands.Cog):
                     cursor, loser.id, winner_name, loser_score, winner_score
                 )
                 match_id = next_match_id(cursor)
+                current_season, current_month = get_season_month_cursor(cursor, guild_id)
                 add_match_history_row(
                     cursor,
                     match_id=match_id,
@@ -471,6 +472,8 @@ class ReportingCog(commands.Cog):
                     losses=loser_score,
                     elo_init=winner_elo,
                     elo_final=new_winner_elo,
+                    season=current_season,
+                    month=current_month,
                 )
                 add_match_history_row(
                     cursor,
@@ -481,6 +484,8 @@ class ReportingCog(commands.Cog):
                     losses=winner_score,
                     elo_init=loser_elo,
                     elo_final=new_loser_elo,
+                    season=current_season,
+                    month=current_month,
                 )
                 increment_player_matches(cursor, winner.id)
                 increment_player_matches(cursor, loser.id)
@@ -730,6 +735,7 @@ class ReportingCog(commands.Cog):
                     cursor, loser.id, winner_name, loser_score, winner_score
                 )
                 match_id = next_match_id(cursor)
+                current_season, current_month = get_season_month_cursor(cursor, ctx.guild.id)
                 add_match_history_row(
                     cursor,
                     match_id=match_id,
@@ -739,6 +745,8 @@ class ReportingCog(commands.Cog):
                     losses=loser_score,
                     elo_init=winner_elo,
                     elo_final=new_winner_elo,
+                    season=current_season,
+                    month=current_month,
                 )
                 add_match_history_row(
                     cursor,
@@ -749,6 +757,8 @@ class ReportingCog(commands.Cog):
                     losses=winner_score,
                     elo_init=loser_elo,
                     elo_final=new_loser_elo,
+                    season=current_season,
+                    month=current_month,
                 )
                 increment_player_matches(cursor, winner.id)
                 increment_player_matches(cursor, loser.id)

@@ -7,10 +7,11 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 
 
-# A player's match_history rows are capped at this many. Once a player would
-# have a 31st stored row, the oldest one is evicted (FIFO) - see
-# trim_match_history() below, called right after each new row is added.
-MAX_HISTORY_PER_PLAYER = 30
+# A player's match_history rows used to be capped and FIFO-evicted once full;
+# this limit has been removed, so match history is now kept indefinitely.
+# Kept as None (rather than deleting the constant) since trim_match_history()
+# still accepts an explicit `keep` value for callers that want a cap.
+MAX_HISTORY_PER_PLAYER = None
 
 
 @dataclass(frozen=True)
@@ -23,6 +24,8 @@ class MatchHistoryRow:
     elo_init: int
     elo_final: int
     played_at: int
+    season: int | None = None
+    month: int | None = None
 
     @property
     def elo_delta(self) -> int:
@@ -41,6 +44,8 @@ def create_match_history_table(cursor: sqlite3.Cursor) -> None:
             elo_init INTEGER NOT NULL,
             elo_final INTEGER NOT NULL,
             played_at INTEGER NOT NULL,
+            season INTEGER DEFAULT NULL,
+            month INTEGER DEFAULT NULL,
             PRIMARY KEY (match_id, player_id),
             FOREIGN KEY (player_id) REFERENCES players(id) ON DELETE CASCADE
         )
@@ -70,16 +75,18 @@ def add_match_history_row(
     elo_init: int,
     elo_final: int,
     played_at: int | None = None,
+    season: int | None = None,
+    month: int | None = None,
 ) -> None:
     ts = played_at if played_at is not None else int(datetime.now(timezone.utc).timestamp())
     cursor.execute(
         """
         INSERT INTO match_history (
             match_id, player_id, opponent_name, wins, losses,
-            elo_init, elo_final, played_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            elo_init, elo_final, played_at, season, month
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
-        (match_id, str(player_id), opponent_name, wins, losses, elo_init, elo_final, ts),
+        (match_id, str(player_id), opponent_name, wins, losses, elo_init, elo_final, ts, season, month),
     )
 
 
@@ -103,13 +110,33 @@ def decrement_player_matches(cursor: sqlite3.Cursor, player_id: str | int) -> No
     )
 
 
+def _row_from_tuple(row: tuple) -> MatchHistoryRow:
+    return MatchHistoryRow(
+        match_id=row[0],
+        player_id=row[1],
+        opponent_name=row[2],
+        wins=row[3],
+        losses=row[4],
+        elo_init=row[5],
+        elo_final=row[6],
+        played_at=row[7],
+        season=row[8] if len(row) > 8 else None,
+        month=row[9] if len(row) > 9 else None,
+    )
+
+
+_HISTORY_COLUMNS = (
+    "match_id, player_id, opponent_name, wins, losses, "
+    "elo_init, elo_final, played_at, season, month"
+)
+
+
 def get_recent_match_history(
     cursor: sqlite3.Cursor, player_id: str | int, limit: int, offset: int = 0
 ) -> list[MatchHistoryRow]:
     cursor.execute(
-        """
-        SELECT match_id, player_id, opponent_name, wins, losses,
-               elo_init, elo_final, played_at
+        f"""
+        SELECT {_HISTORY_COLUMNS}
         FROM match_history
         WHERE player_id=?
         ORDER BY played_at DESC, match_id DESC
@@ -117,24 +144,83 @@ def get_recent_match_history(
         """,
         (str(player_id), limit, offset),
     )
-    return [
-        MatchHistoryRow(
-            match_id=row[0],
-            player_id=row[1],
-            opponent_name=row[2],
-            wins=row[3],
-            losses=row[4],
-            elo_init=row[5],
-            elo_final=row[6],
-            played_at=row[7],
-        )
-        for row in cursor.fetchall()
-    ]
+    return [_row_from_tuple(row) for row in cursor.fetchall()]
+
+
+def get_match_history_by_season_month(
+    cursor: sqlite3.Cursor,
+    player_id: str | int,
+    season: int,
+    month: int,
+    limit: int,
+    offset: int = 0,
+) -> list[MatchHistoryRow]:
+    """Same as get_recent_match_history(), but filtered to one season/month."""
+    cursor.execute(
+        f"""
+        SELECT {_HISTORY_COLUMNS}
+        FROM match_history
+        WHERE player_id=? AND season=? AND month=?
+        ORDER BY played_at DESC, match_id DESC
+        LIMIT ? OFFSET ?
+        """,
+        (str(player_id), season, month, limit, offset),
+    )
+    return [_row_from_tuple(row) for row in cursor.fetchall()]
+
+
+def get_full_match_history_by_season_month(
+    cursor: sqlite3.Cursor,
+    player_id: str | int,
+    season: int,
+    month: int,
+) -> list[MatchHistoryRow]:
+    """All match_history rows for one season/month, unpaginated (most recent
+    first). Used to compute a month-scoped stat (e.g. -history's "Best
+    Streak") that needs the whole month's data, not just the current page."""
+    cursor.execute(
+        f"""
+        SELECT {_HISTORY_COLUMNS}
+        FROM match_history
+        WHERE player_id=? AND season=? AND month=?
+        ORDER BY played_at DESC, match_id DESC
+        """,
+        (str(player_id), season, month),
+    )
+    return [_row_from_tuple(row) for row in cursor.fetchall()]
+
+
+def get_best_streak_by_season_month(
+    cursor: sqlite3.Cursor,
+    player_id: str | int,
+    season: int,
+    month: int,
+) -> int:
+    """Longest run of consecutive same-result matches (win or loss) within
+    one season/month, independent of the player's all-time
+    win_streak/highest_win_streak fields (which get_win_streak() reads and
+    which are shared with /stats). A "win" is any row where wins > losses."""
+    rows = get_full_match_history_by_season_month(cursor, player_id, season, month)
+    if not rows:
+        return 0
+
+    best = 0
+    current_len = 0
+    current_result: bool | None = None
+    for row in rows:
+        result = row.wins > row.losses
+        if result == current_result:
+            current_len += 1
+        else:
+            current_result = result
+            current_len = 1
+        best = max(best, current_len)
+    return best
 
 
 def count_player_match_history(cursor: sqlite3.Cursor, player_id: str | int) -> int:
-    """Number of match_history rows actually stored for this player (capped
-    at MAX_HISTORY_PER_PLAYER by trim_match_history)."""
+    """Number of match_history rows actually stored for this player (match
+    history storage is unbounded; see trim_match_history)."""
     cursor.execute(
         "SELECT COUNT(*) FROM match_history WHERE player_id=?",
         (str(player_id),),
@@ -143,18 +229,64 @@ def count_player_match_history(cursor: sqlite3.Cursor, player_id: str | int) -> 
     return int(row[0]) if row else 0
 
 
+def count_player_match_history_by_season_month(
+    cursor: sqlite3.Cursor, player_id: str | int, season: int, month: int
+) -> int:
+    """Number of match_history rows stored for this player in one season/month."""
+    cursor.execute(
+        "SELECT COUNT(*) FROM match_history WHERE player_id=? AND season=? AND month=?",
+        (str(player_id), season, month),
+    )
+    row = cursor.fetchone()
+    return int(row[0]) if row else 0
+
+
+def get_seasons_with_history(cursor: sqlite3.Cursor, player_id: str | int) -> list[int]:
+    """Distinct seasons (naturally sorted, most recent first) this player has matches in."""
+    cursor.execute(
+        """
+        SELECT DISTINCT season FROM match_history
+        WHERE player_id=? AND season IS NOT NULL
+        ORDER BY season DESC
+        """,
+        (str(player_id),),
+    )
+    return [row[0] for row in cursor.fetchall()]
+
+
+def get_months_with_history(
+    cursor: sqlite3.Cursor, player_id: str | int, season: int
+) -> list[int]:
+    """Distinct months (ascending) this player has matches in, for one season."""
+    cursor.execute(
+        """
+        SELECT DISTINCT month FROM match_history
+        WHERE player_id=? AND season=? AND month IS NOT NULL
+        ORDER BY month ASC
+        """,
+        (str(player_id), season),
+    )
+    return [row[0] for row in cursor.fetchall()]
+
+
 def trim_match_history(
     cursor: sqlite3.Cursor,
     player_id: str | int,
-    keep: int = MAX_HISTORY_PER_PLAYER,
+    keep: int | None = MAX_HISTORY_PER_PLAYER,
 ) -> None:
     """Keep only the ``keep`` most recent match_history rows for a player.
 
-    Once a player would have more than ``keep`` rows stored (e.g. a 31st
-    match), the oldest rows beyond the limit are deleted - equivalent to
-    evicting match #1 and shifting #2 -> #1, #3 -> #2, ... since rows are
-    always read back ordered by recency.
+    Match history storage is unbounded by default (``keep=None``, i.e. no
+    rows are ever evicted). Pass an explicit ``keep`` count to cap it again.
+
+    When capped, once a player would have more than ``keep`` rows stored,
+    the oldest rows beyond the limit are deleted - equivalent to evicting
+    match #1 and shifting #2 -> #1, #3 -> #2, ... since rows are always read
+    back ordered by recency.
     """
+    if keep is None:
+        return
+
     cursor.execute(
         """
         DELETE FROM match_history

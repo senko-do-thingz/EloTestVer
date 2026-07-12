@@ -149,6 +149,22 @@ class NextBtn(discord.ui.Button):
         await self._view.update(interaction)
 
 
+class MyRankBtn(discord.ui.Button):
+    def __init__(self, view: "LBView"):
+        super().__init__(label="My Rank", style=discord.ButtonStyle.secondary)
+        self._view = view
+
+    async def callback(self, interaction: discord.Interaction):
+        # Only the user who ran the command can use this button.
+        if interaction.user.id != self._view.invoker_id:
+            await interaction.response.send_message(
+                "You cannot perform this action.", ephemeral=True
+            )
+            return
+        self._view.jump_to_target = True
+        await self._view.update(interaction)
+
+
 class SearchPlayerBtn(discord.ui.Button):
     def __init__(self, view: "LBView"):
         super().__init__(label="Search Player", style=discord.ButtonStyle.primary)
@@ -289,7 +305,7 @@ class PlayerSearchModal(discord.ui.Modal, title="Search Player Stats"):
                     else None
                 )
                 stat_lines.append(
-                    f"**🎮 Monthly Games Played:** {games_played_this_month}{_rank(monthly_rank)}"
+                    f"**🎮 Monthly Games:** {games_played_this_month}{_rank(monthly_rank)}"
                 )
 
             if win_rate != "-":
@@ -314,7 +330,7 @@ class PlayerSearchModal(discord.ui.Modal, title="Search Player Stats"):
                         )
                     else:
                         most_played_text = "-"
-                stat_lines.append(f"**👥 Most Played Against:** {most_played_text}")
+                stat_lines.append(f"**👥 Most Played:** {most_played_text}")
             except Exception:
                 pass
 
@@ -354,6 +370,7 @@ class LBView(discord.ui.View):
         *,
         category: str = "elo",
         bot=None,
+        invoker_id: int | None = None,
     ):
         # Modified: timeout synced with LeaderboardView (-lb) so -lbs buttons
         # also auto-disable after inactivity instead of staying active forever.
@@ -368,7 +385,13 @@ class LBView(discord.ui.View):
         self.per_page = 10
         self.total_pages = 1
         self.bot = bot
+        # ID of the user who originally ran the -lbs command; only they may
+        # use the My Rank button.
+        self.invoker_id = invoker_id
         self.message: discord.Message | None = None
+        # Set by MyRankBtn; consumed once by the next update() call to jump
+        # to the page the invoking user is currently ranked on.
+        self.jump_to_target = False
 
         # Back button is added by the caller (season_view.py) so it can close
         # back to the correct MonthView.  We reserve a slot by requiring callers
@@ -378,6 +401,8 @@ class LBView(discord.ui.View):
         self.add_item(LBDropdown(self))
         self.add_item(PrevBtn(self))
         self.add_item(NextBtn(self))
+        self.my_rank_button = MyRankBtn(self)
+        self.add_item(self.my_rank_button)
         self.add_item(SearchPlayerBtn(self))
 
     def set_back_button(self, btn: discord.ui.Button):
@@ -499,11 +524,7 @@ class LBView(discord.ui.View):
             ]
             players_data.sort(key=lambda x: x[1], reverse=True)
 
-            self.total_pages = max(1, (len(players_data) - 1) // self.per_page + 1)
-            start = self.page * self.per_page
-            end = start + self.per_page
-
-            # ── highlight current user ───────────────────────────────────────
+            # ── identify current user (for highlighting + My Rank) ────────────
             user_id = str(interaction.user.id)
             user_registered_name = None
             try:
@@ -517,14 +538,8 @@ class LBView(discord.ui.View):
             except Exception:
                 pass
 
-            entries = []
-            for i, (name, value, discord_id) in enumerate(
-                players_data[start:end], start=start + 1
-            ):
-                stat_str = (
-                    f"{value:.2f}" if self.category == "win_rate" else str(value)
-                )
-                highlight = (
+            def _is_target(name: str, discord_id: str | None) -> bool:
+                return (
                     discord_id == user_id
                     if discord_id
                     else (
@@ -532,7 +547,86 @@ class LBView(discord.ui.View):
                         and name.lower() == user_registered_name
                     )
                 )
-                entries.append((i, name, stat_str, highlight))
+
+            # ── identify the command invoker (for greying out My Rank) ────────
+            # This is deliberately separate from the "current viewer" lookup
+            # above: prev/next/dropdown can be used by anyone, but only the
+            # invoker can use My Rank, so the button's disabled state must
+            # always reflect the invoker's presence on the page, not the
+            # presence of whoever happens to be clicking right now.
+            invoker_id_str = str(self.invoker_id) if self.invoker_id is not None else None
+            if invoker_id_str is not None and invoker_id_str == user_id:
+                invoker_registered_name = user_registered_name
+            else:
+                invoker_registered_name = None
+                if invoker_id_str is not None:
+                    try:
+                        with db_connection(self.lb_guild_id) as (conn, cursor):
+                            cursor.execute(
+                                "SELECT name FROM players WHERE id = ?", (invoker_id_str,)
+                            )
+                            row = cursor.fetchone()
+                            if row:
+                                invoker_registered_name = row[0].lower()
+                    except Exception:
+                        pass
+
+            def _is_invoker(name: str, discord_id: str | None) -> bool:
+                if invoker_id_str is None:
+                    return False
+                return (
+                    discord_id == invoker_id_str
+                    if discord_id
+                    else (
+                        invoker_registered_name is not None
+                        and name.lower() == invoker_registered_name
+                    )
+                )
+
+            if self.jump_to_target:
+                self.jump_to_target = False
+                target_index = next(
+                    (
+                        i
+                        for i, (name, _, discord_id) in enumerate(players_data)
+                        if _is_target(name, discord_id)
+                    ),
+                    None,
+                )
+                if target_index is None:
+                    await interaction.response.send_message(
+                        embed=discord.Embed(
+                            title="Not Ranked",
+                            description=(
+                                "You are not currently ranked in this leaderboard category."
+                            ),
+                            color=discord.Color.red(),
+                        ),
+                        ephemeral=True,
+                    )
+                    return
+                self.page = target_index // self.per_page
+
+            self.total_pages = max(1, (len(players_data) - 1) // self.per_page + 1)
+            if self.page >= self.total_pages:
+                self.page = self.total_pages - 1
+            start = self.page * self.per_page
+            end = start + self.per_page
+
+            entries = []
+            for i, (name, value, discord_id) in enumerate(
+                players_data[start:end], start=start + 1
+            ):
+                stat_str = (
+                    f"{value:.2f}" if self.category == "win_rate" else str(value)
+                )
+                entries.append((i, name, stat_str, _is_target(name, discord_id)))
+
+            # Grey out My Rank once the invoker's own row is already visible.
+            self.my_rank_button.disabled = any(
+                _is_invoker(name, discord_id)
+                for name, _, discord_id in players_data[start:end]
+            )
 
             title_suffix = CATEGORY_TITLES.get(self.category, "Elo")
             embed, file = build_leaderboard_embed(

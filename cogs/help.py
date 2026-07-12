@@ -4,6 +4,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
+from db.elo_db import get_season_month
 from utils.autocomplete import command_name_autocomplete
 from utils.command_registry import (
     CommandHelp,
@@ -43,8 +44,8 @@ def _general_commands_list(guild_id: int) -> list[tuple[str, str]]:
             "Report a match result.",
         ),
         (
-            "-history [@player] / /history",
-            "Show recent match history as a paginated image (10/page, up to 30 stored); mention a player to view theirs.",
+            "-history / /history [name] [season] [month]",
+            "Show recent match history as a paginated image (10/page, all matches kept). -history always shows your own current season/month; /history can view another player and filter by season/month.",
         ),
     ]
     commands_list.extend(
@@ -235,7 +236,12 @@ class HelpCog(commands.Cog):
         embed.add_field(name="Developer", value="Senko", inline=True)
         embed.add_field(name="Created", value="8 Dec 2024", inline=True)
         embed.add_field(name="Programming Language", value="Python 3.13", inline=True)
-        embed.add_field(name="Library", value="discord.py 2.7.1", inline=True)
+        if ctx.guild is not None:
+            season, month = get_season_month(ctx.guild.id)
+            season_text = f"Season: {season}, Month: {month}"
+        else:
+            season_text = "Not available outside a server"
+        embed.add_field(name="Season", value=season_text, inline=True)
         embed.add_field(name="Bot Time (UTC)", value=current_time, inline=True)
         embed.add_field(name="Commands", value=str(command_count), inline=True)
         embed.add_field(
@@ -322,6 +328,15 @@ class HelpCog(commands.Cog):
                 "Undo a previously confirmed match report. Use the same player1_id, "
                 "p1_score, p2_score, player2_id (same order) as the original /report "
                 "to reverse it. Use `-help revert` for details.",
+            ),
+            (
+                "/months",
+                "Set the total number of months a season can have on this server.",
+            ),
+            (
+                "/season",
+                "Update the current season and month for this server. Requires "
+                "/months to be set first.",
             ),
         ]
         admin_commands = {

@@ -155,7 +155,7 @@ class StatsCog(commands.Cog):
             f"{league_line}\n"
             f"🏆 Games Won: {games_won}\n"
             f"💀 Games Lost: {games_lost}\n"
-            f"🎮 Monthly Games Played: {games_played_this_month}\n"
+            f"🎮 Monthly Games: {games_played_this_month}\n"
             f"📊 Win Rate: {win_rate:.2f}% (Win Streak: {win_streak})\n"
             f"{tail}"
         )

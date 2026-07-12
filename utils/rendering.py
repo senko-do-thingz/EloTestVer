@@ -408,6 +408,8 @@ def render_history_image(
     width: int = 620,
     highest_streak: int | None = None,
     avatar_bytes: bytes | None = None,
+    season_month_text: str | None = None,
+    year_text: str | None = None,
 ) -> io.BytesIO:
     """
     Render match history rows as a PNG "log" table, ClashPerk-style:
@@ -418,13 +420,30 @@ def render_history_image(
     the right side of the summary row. This is purely cosmetic: win streak
     never factors into the Elo math.
 
+    If ``year_text`` is given (e.g. "Year: 2026"), it is drawn right-aligned
+    directly above ``season_month_text``.
+
+    If ``season_month_text`` is given (e.g. "Season: 1, Month: 2"), it is
+    drawn right-aligned directly above the "Best Streak" badge (or directly
+    below ``year_text`` when that is also given).
+
     If ``avatar_bytes`` is given, the player's avatar is drawn as a small
     circular thumbnail directly in front of the title (to its left), inside
     the image itself.
+
+    ``rows`` are expected to be ordered most-recent-first (as returned by
+    the match history queries). Consecutive rows with the same result (win
+    or loss) form a "streak"; the streak length is drawn as a small colored
+    number in a dedicated column to the left of each row's win/loss accent
+    bar, but only on the first row of each streak (i.e. the most recent
+    match in that streak, or the row where the previous streak was cut
+    off) - the remaining rows of the same streak are left blank.
     """
     row_height = 42 * SCALE
     pad_x = 20 * SCALE
+    streak_w = 22 * SCALE
     title_h = 34 * SCALE
+    season_h = 20 * SCALE if season_month_text else 0
     summary_h = 26 * SCALE if (summary or highest_streak is not None) else 0
     col_header_h = 30 * SCALE
     pad_bottom = 14 * SCALE
@@ -432,7 +451,7 @@ def render_history_image(
     accent_gap = 10 * SCALE
     width_px = width * SCALE
 
-    # Column widths (must sum to width_px - 2*pad_x - accent_w - accent_gap)
+    # Column widths (must sum to width_px - 2*pad_x - streak_w - accent_w - accent_gap)
     date_w = 70 * SCALE
     wins_w = 55 * SCALE
     losses_w = 55 * SCALE
@@ -440,9 +459,9 @@ def render_history_image(
     init_w = 80 * SCALE
     final_w = 80 * SCALE
     fixed_w = date_w + wins_w + losses_w + delta_w + init_w + final_w
-    opponent_w = width_px - pad_x * 2 - accent_w - accent_gap - fixed_w
+    opponent_w = width_px - pad_x * 2 - streak_w - accent_w - accent_gap - fixed_w
 
-    top_h = title_h + summary_h + col_header_h
+    top_h = title_h + season_h + summary_h + col_header_h
     height_px = top_h + len(rows) * row_height + pad_bottom
 
     img = _get_lb_template(width_px, height_px).copy()
@@ -454,7 +473,8 @@ def render_history_image(
     cell_font = _load_latin_font(17 * SCALE)
     cell_font_bold = _load_latin_font(17 * SCALE, bold=True)
 
-    content_x0 = pad_x + accent_w + accent_gap
+    accent_x0 = pad_x + streak_w
+    content_x0 = accent_x0 + accent_w + accent_gap
 
     # ── title / summary ────────────────────────────────────────────────
     title_x = pad_x
@@ -473,22 +493,41 @@ def render_history_image(
             title_x = pad_x + avatar_size + 8 * SCALE
 
     draw.text((title_x, title_y), title, fill=_LB_TEXT, font=title_font)
+    if year_text:
+        # Same row and same size as the title, right-aligned.
+        year_font = _load_latin_font(22 * SCALE, bold=True)
+        year_w = draw.textlength(year_text, font=year_font)
+        draw.text(
+            (width_px - pad_x - year_w, title_y),
+            year_text,
+            fill=_LB_TEXT,
+            font=year_font,
+        )
+    if season_month_text:
+        season_font = _load_latin_font(14 * SCALE, bold=True)
+        season_w = draw.textlength(season_month_text, font=season_font)
+        draw.text(
+            (width_px - pad_x - season_w, title_h + 4 * SCALE),
+            season_month_text,
+            fill=_LB_TEXT_MUTED,
+            font=season_font,
+        )
     if summary:
         draw.text(
-            (pad_x, title_h + 4 * SCALE),
+            (pad_x, title_h + season_h + 4 * SCALE),
             summary,
             fill=_LB_TEXT_MUTED,
             font=summary_font,
         )
     if highest_streak is not None:
-        streak_text = f"Best Streak: {highest_streak}"
-        streak_font = _load_latin_font(14 * SCALE, bold=True)
-        streak_w = draw.textlength(streak_text, font=streak_font)
+        streak_badge_text = f"Best Streak: {highest_streak}"
+        streak_badge_font = _load_latin_font(14 * SCALE, bold=True)
+        streak_badge_w = draw.textlength(streak_badge_text, font=streak_badge_font)
         draw.text(
-            (width_px - pad_x - streak_w, title_h + 4 * SCALE),
-            streak_text,
+            (width_px - pad_x - streak_badge_w, title_h + season_h + 4 * SCALE),
+            streak_badge_text,
             fill=_LB_TEXT,
-            font=streak_font,
+            font=streak_badge_font,
         )
 
     # ── column headers ─────────────────────────────────────────────────
@@ -502,7 +541,7 @@ def render_history_image(
     col_x["init"] = col_x["delta"] + delta_w
     col_x["final"] = col_x["init"] + init_w
 
-    header_y = title_h + summary_h + 4 * SCALE
+    header_y = title_h + season_h + summary_h + 4 * SCALE
     draw.text((col_x["date"], header_y), "DATE", fill=_LB_TEXT_MUTED, font=header_font)
     draw.text((col_x["opponent"], header_y), "OPPONENT", fill=_LB_TEXT_MUTED, font=header_font)
     draw.text((col_x["wins"], header_y), "W", fill=_LB_TEXT_MUTED, font=header_font)
@@ -518,6 +557,20 @@ def render_history_image(
         width=max(1, SCALE // 2),
     )
 
+    # ── streak grouping ────────────────────────────────────────────────
+    # rows are most-recent-first, so a streak's "first" row (top of the
+    # group) is the most recent match in it, or the row where the previous
+    # (opposite-result) streak was cut off. Only that row gets a number.
+    streak_labels: list[int | None] = [None] * len(rows)
+    i = 0
+    while i < len(rows):
+        result = rows[i][2] > rows[i][3]  # won
+        j = i
+        while j < len(rows) and (rows[j][2] > rows[j][3]) == result:
+            j += 1
+        streak_labels[i] = j - i
+        i = j
+
     # ── rows ────────────────────────────────────────────────────────────
     for idx, (date_str, opponent, wins, losses, delta, elo_init, elo_final) in enumerate(rows):
         won = wins > losses
@@ -526,8 +579,19 @@ def render_history_image(
         y1 = y0 + row_height - 6 * SCALE
         text_y = y0 + 9 * SCALE
 
+        streak_label = streak_labels[idx]
+        if streak_label is not None:
+            streak_num_text = str(streak_label)
+            streak_num_w = draw.textlength(streak_num_text, font=cell_font_bold)
+            draw.text(
+                (accent_x0 - 6 * SCALE - streak_num_w, text_y),
+                streak_num_text,
+                fill=accent_color,
+                font=cell_font_bold,
+            )
+
         draw.rounded_rectangle(
-            (pad_x, y0, pad_x + accent_w, y1),
+            (accent_x0, y0, accent_x0 + accent_w, y1),
             radius=2 * SCALE,
             fill=accent_color,
         )
@@ -563,6 +627,8 @@ async def render_history_image_async(
     width: int = 620,
     highest_streak: int | None = None,
     avatar_bytes: bytes | None = None,
+    season_month_text: str | None = None,
+    year_text: str | None = None,
 ) -> io.BytesIO:
     """Async wrapper around render_history_image (see render_leaderboard_image_async)."""
     return await asyncio.to_thread(
@@ -573,6 +639,8 @@ async def render_history_image_async(
         width=width,
         highest_streak=highest_streak,
         avatar_bytes=avatar_bytes,
+        season_month_text=season_month_text,
+        year_text=year_text,
     )
 
 # ---------------------------------------------------------------------------

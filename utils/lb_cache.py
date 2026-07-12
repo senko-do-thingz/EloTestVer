@@ -39,6 +39,10 @@ _rebuild_tasks: dict[int, asyncio.Task] = {}
 CATEGORIES = ("elo", "wins", "losses", "win_rate", "games_played_this_month")
 PER_PAGE = 10
 
+# Must match LeaderboardView._title_prefix() in cogs/leaderboard.py so a
+# cache-served page is visually indistinguishable from a freshly rendered one.
+LB_TITLE_PREFIX = "Leaderboard - "
+
 
 # ---------------------------------------------------------------------------
 # Public API
@@ -136,7 +140,7 @@ async def _rebuild_guild(bot: "discord.ext.commands.Bot", guild_id: int) -> None
                     buf: io.BytesIO = await asyncio.to_thread(
                         render_leaderboard_image,
                         page_entries,
-                        title=f"Lb - {title}",
+                        title=f"{LB_TITLE_PREFIX}{title}",
                         page=page + 1,
                         total_pages=total_pages,
                     )
