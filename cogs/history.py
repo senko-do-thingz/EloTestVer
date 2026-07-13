@@ -23,7 +23,6 @@ from db.match_history_db import (
     get_full_match_history_by_season_month,
     get_match_history_by_season_month,
     get_months_with_history,
-    get_seasons_with_history,
 )
 from utils import (
     build_calendar_series,
@@ -47,45 +46,60 @@ ACCENT_COLOR = discord.Color.dark_grey()
 MONTH_REPLY_TIMEOUT = 300.0
 
 
+def _compute_axis_bounds(elo_values: list[int]) -> tuple[int, int]:
+    """Y-axis bounds for the elo graph: default 300-1000, extended outward
+    (rounded to the nearest 50 for clean gridlines) to cover any actual elo
+    value outside that range, instead of letting rendering.py clamp the
+    drawn line to the default range (see Q1: elo above 1000, while rare,
+    does happen roughly once a season)."""
+    axis_min, axis_max = 300, 1000
+    if not elo_values:
+        return axis_min, axis_max
+    lo, hi = min(elo_values), max(elo_values)
+    if lo < axis_min:
+        axis_min = (lo // 50) * 50
+    if hi > axis_max:
+        axis_max = -(-hi // 50) * 50  # ceil to nearest 50
+    return int(axis_min), int(axis_max)
+
+
 def _previous_season_month(
     cursor, player_id: str | int, season: int, month: int
 ) -> tuple[int, int] | None:
-    """Resolve the (season, month) immediately before the given one, for
-    this specific player, based on actual match_history data (not the
-    server's configured max_month, which may be unset or may not reflect
-    what a given player actually played through).
+    """Resolve the single (season, month) immediately adjacent to the given
+    one - i.e. (season, month - 1), or the previous season's last
+    configured month (see /months) when month == 1.
 
-    Both branches below search for the player's most recent month that
-    actually HAS data, rather than blindly returning ``month - 1``: a
-    player can go a whole month without playing a single match (e.g.
-    inactive in month 2, then plays again in month 3), and in that case
-    "the previous month" for comparison purposes has to skip back past
-    the empty month to month 1, not silently point at empty month 2 -
-    which would make the graph's carry-over anchor and "vs last month"
-    stats disappear even though real prior data exists.
+    This deliberately does NOT walk back further through empty months or
+    seasons: if a player skipped the immediately preceding month/season
+    entirely (no matches at all), the graph's "vs last month" comparison
+    is simply unavailable - the caller shows "No data available" instead
+    of silently anchoring to whatever older month happens to have data.
 
-    Returns None if there is no earlier season/month with data - e.g. this
-    is the player's very first month.
+    Returns None when there is no adjacent slot to check (season 1,
+    month 1) or when that adjacent slot has no recorded matches for this
+    player.
     """
-    earlier_months_this_season = [
-        m for m in get_months_with_history(cursor, player_id, season) if m < month
-    ]
-    if earlier_months_this_season:
-        return season, max(earlier_months_this_season)
+    if month > 1:
+        candidate_season, candidate_month = season, month - 1
+    else:
+        if season <= 1:
+            return None
+        cursor.execute("SELECT max_month FROM settings LIMIT 1")
+        row = cursor.fetchone()
+        max_month = row[0] if row and row[0] is not None else None
+        if max_month is None:
+            # No /months configuration to know the previous season's last
+            # month from - nothing safe to anchor to.
+            return None
+        candidate_season, candidate_month = season - 1, max_month
 
-    # No earlier month with data in THIS season - walk back through every
-    # earlier season the player has any data in (not just season - 1),
-    # since a player can skip an entire season (e.g. inactive all of
-    # season 2, then plays again in season 3) and the previous-month
-    # lookup still needs to land on season 1's last month in that case.
-    for prev_season in sorted(
-        (s for s in get_seasons_with_history(cursor, player_id) if s < season),
-        reverse=True,
-    ):
-        months = get_months_with_history(cursor, player_id, prev_season)
-        if months:
-            return prev_season, max(months)
-    return None
+    has_data = count_player_match_history_by_season_month(
+        cursor, player_id, candidate_season, candidate_month
+    ) > 0
+    if not has_data:
+        return None
+    return candidate_season, candidate_month
 
 
 def _footer_text(last_updated: datetime) -> str:
@@ -486,6 +500,14 @@ class HistoryView(discord.ui.LayoutView):
             anchor_before_first_match=anchor_before_first_match,
         )
 
+        # The y-axis defaults to 300-1000, but must never clamp a real elo
+        # value that falls outside that range (see Q1): extend the axis to
+        # cover the actual data instead of hard-clamping the drawn line.
+        elo_values = [point[1] for point in series]
+        if compare_series:
+            elo_values.extend(point[1] for point in compare_series)
+        axis_min, axis_max = _compute_axis_bounds(elo_values)
+
         avatar_bytes = await self._fetch_avatar_bytes()
         buf = await render_elo_graph_image_async(
             series,
@@ -502,8 +524,11 @@ class HistoryView(discord.ui.LayoutView):
             prev_avg_gain=prev_averages.avg_gain if prev_averages else None,
             prev_final_elo=anchor_elo,
             prev_month_label=prev_month_label,
+            no_prev_data=prev is None,
             compare_series=compare_series,
             axis_ticks=axis_ticks,
+            axis_min=axis_min,
+            axis_max=axis_max,
         )
         filename = "elo_graph.png"
         file = discord.File(buf, filename=filename)

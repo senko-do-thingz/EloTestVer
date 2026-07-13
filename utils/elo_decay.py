@@ -13,9 +13,21 @@ import os
 import discord
 from discord.ext import commands
 
-from db.elo_db import get_db_path, get_decay_log_channel_id, get_log_channel_id, get_nickname
+from db.elo_db import (
+    db_connection,
+    get_db_path,
+    get_decay_log_channel_id,
+    get_log_channel_id,
+    get_max_month,
+    get_nickname,
+)
+from db.match_history_db import (
+    delete_match_history_by_season_month,
+    get_match_history_rows_by_season_month_all_players,
+)
 from utils.league import get_league_announce_channels
 from utils.logger import PRIVATE_GUILD_ID
+from utils.match_export import build_match_listing_workbook, workbook_to_file_bytes
 
 
 async def post_decay_log(bot: commands.Bot, guild_id: int, embed: discord.Embed) -> None:
@@ -307,3 +319,118 @@ async def announce_league_changes(
                 await ch.send(chunk)
         except Exception:
             pass
+
+
+# ---------------------------------------------------------------------------
+# Match history purge - 2 months behind the new current month
+#
+# Every time -decay runs (manual or automatic) and the season/month cursor
+# advances, match_history for the season/month 2 months behind the NEW
+# current month is archived to an Excel file (same layout as -match_ids)
+# and posted to the -decay_setup log channel, then deleted. Example: current
+# is Season 7 Month 2, -decay advances to Season 7 Month 3, so Season 7
+# Month 1's match_history is archived + purged.
+# ---------------------------------------------------------------------------
+
+
+def _step_back_one_month(
+    season: int, month: int, max_month: int | None
+) -> tuple[int, int] | None:
+    if month > 1:
+        return season, month - 1
+    if season <= 1 or max_month is None:
+        # Can't resolve the previous season's last month without /months
+        # being configured, and there is no season before season 1.
+        return None
+    return season - 1, max_month
+
+
+def two_months_before(
+    season: int, month: int, max_month: int | None
+) -> tuple[int, int] | None:
+    """(season, month) 2 months behind the given one, or None if it can't
+    be resolved (e.g. crosses a season boundary with /months never set)."""
+    step1 = _step_back_one_month(season, month, max_month)
+    if step1 is None:
+        return None
+    return _step_back_one_month(step1[0], step1[1], max_month)
+
+
+async def purge_old_match_history(
+    bot: commands.Bot, guild_id: int, new_season: int, new_month: int
+) -> str:
+    """Archive + delete match_history for the season/month 2 months behind
+    (new_season, new_month), the season/month -decay just moved into.
+
+    The archive (every player's matches for that season/month, same
+    win/green - loss/red layout as -match_ids) is sent to the channel
+    configured via -decay_setup, if any, BEFORE anything is deleted.
+    Never raises - a purge issue must never block -decay from completing.
+    Returns a one-line summary for the decay change-log embed.
+    """
+    max_month = get_max_month(guild_id)
+    target = two_months_before(new_season, new_month, max_month)
+    if target is None:
+        return (
+            "History purge skipped: could not resolve a season/month 2 "
+            "months back (check /months configuration)."
+        )
+    target_season, target_month = target
+
+    with db_connection(guild_id) as (_conn, cursor):
+        rows = get_match_history_rows_by_season_month_all_players(
+            cursor, target_season, target_month
+        )
+
+    if not rows:
+        return (
+            f"History purge skipped: no recorded matches in Season "
+            f"{target_season}, Month {target_month}."
+        )
+
+    with db_connection(guild_id) as (_conn, cursor):
+        cursor.execute("SELECT id, name FROM players")
+        name_lookup = {str(pid): name for pid, name in cursor.fetchall()}
+
+    try:
+        workbook = build_match_listing_workbook(
+            rows,
+            name_lookup,
+            sheet_title=f"S{target_season}M{target_month}",
+            header_text=(
+                f"Server {guild_id} - Season {target_season} Month "
+                f"{target_month} Archive (purged by -decay)"
+            ),
+        )
+        buf = workbook_to_file_bytes(workbook)
+        channel_id = get_decay_log_channel_id(guild_id)
+        if channel_id is not None:
+            channel = bot.get_channel(channel_id)
+            if channel is None:
+                try:
+                    channel = await bot.fetch_channel(channel_id)
+                except Exception:
+                    channel = None
+            if channel is not None:
+                filename = f"S{target_season}M{target_month}_archive.xlsx"
+                await channel.send(
+                    content=(
+                        f"Archiving Season {target_season}, Month "
+                        f"{target_month} history before deletion "
+                        f"({len(rows)} row(s))."
+                    ),
+                    file=discord.File(buf, filename=filename),
+                )
+    except Exception:
+        # A failed archive upload must not block the purge from running -
+        # the change log line below still records exactly what happened.
+        pass
+
+    with db_connection(guild_id) as (conn, cursor):
+        deleted = delete_match_history_by_season_month(cursor, target_season, target_month)
+        conn.commit()
+
+    return (
+        f"Purged {deleted} match_history row(s) from Season {target_season}, "
+        f"Month {target_month} (archived to decay log channel first, if configured)."
+    )

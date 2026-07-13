@@ -2,9 +2,16 @@
 
 from __future__ import annotations
 
+import random
 import sqlite3
 from dataclasses import dataclass
 from datetime import datetime, timezone
+
+# Range used to generate random match IDs (see next_match_id). Wide enough
+# that collisions are rare, while still comfortably fitting in a SQLite
+# INTEGER column.
+_MATCH_ID_MIN = 100_000
+_MATCH_ID_MAX = 999_999_999
 
 
 # A player's match_history rows used to be capped and FIFO-evicted once full;
@@ -60,8 +67,21 @@ def create_match_history_table(cursor: sqlite3.Cursor) -> None:
 
 
 def next_match_id(cursor: sqlite3.Cursor) -> int:
-    cursor.execute("SELECT COALESCE(MAX(match_id), 0) + 1 FROM match_history")
-    return int(cursor.fetchone()[0])
+    """Generate a new match ID.
+
+    Match IDs used to be sequential (MAX(match_id) + 1). They are now
+    random, so a match's ID cannot be guessed or inferred from report
+    order - each report gets an unpredictable, strictly unique ID that
+    admins look up via -match_ids before using it with -revert.
+    Uniqueness is still guaranteed by re-rolling on collision.
+    """
+    while True:
+        candidate = random.randint(_MATCH_ID_MIN, _MATCH_ID_MAX)
+        cursor.execute(
+            "SELECT 1 FROM match_history WHERE match_id=? LIMIT 1", (candidate,)
+        )
+        if cursor.fetchone() is None:
+            return candidate
 
 
 def add_match_history_row(
@@ -364,6 +384,70 @@ def find_latest_match_id_for_revert(
 
 def delete_match_history_by_id(cursor: sqlite3.Cursor, match_id: int) -> None:
     cursor.execute("DELETE FROM match_history WHERE match_id=?", (match_id,))
+
+
+def get_match_history_rows_by_match_id(
+    cursor: sqlite3.Cursor, match_id: int
+) -> list[MatchHistoryRow]:
+    """Every row (one per participant) stored for a single match_id.
+
+    A normal match has exactly 2 rows (one per player) - used by -revert
+    to look a match up by its ID instead of by re-typing the original
+    report's players/score, and by -match_ids to resolve who played it.
+    """
+    cursor.execute(
+        f"""
+        SELECT {_HISTORY_COLUMNS}
+        FROM match_history
+        WHERE match_id=?
+        """,
+        (match_id,),
+    )
+    return [_row_from_tuple(row) for row in cursor.fetchall()]
+
+
+def get_all_match_history_rows(cursor: sqlite3.Cursor) -> list[MatchHistoryRow]:
+    """Every match_history row stored for this guild's database, across all
+    players/seasons/months, most recent first. Used by -match_ids to build
+    a full lookup export (admins need every match's ID, not one player's)."""
+    cursor.execute(
+        f"""
+        SELECT {_HISTORY_COLUMNS}
+        FROM match_history
+        ORDER BY played_at DESC, match_id DESC
+        """
+    )
+    return [_row_from_tuple(row) for row in cursor.fetchall()]
+
+
+def get_match_history_rows_by_season_month_all_players(
+    cursor: sqlite3.Cursor, season: int, month: int
+) -> list[MatchHistoryRow]:
+    """Every match_history row (all players) for one season/month, most
+    recent first. Used to build the archive export sent to the decay log
+    channel right before that season/month's history is purged."""
+    cursor.execute(
+        f"""
+        SELECT {_HISTORY_COLUMNS}
+        FROM match_history
+        WHERE season=? AND month=?
+        ORDER BY played_at DESC, match_id DESC
+        """,
+        (season, month),
+    )
+    return [_row_from_tuple(row) for row in cursor.fetchall()]
+
+
+def delete_match_history_by_season_month(
+    cursor: sqlite3.Cursor, season: int, month: int
+) -> int:
+    """Delete every match_history row (all players) for one season/month.
+    Used by -decay to purge history 2 months behind the new current month.
+    Returns the number of rows deleted."""
+    cursor.execute(
+        "DELETE FROM match_history WHERE season=? AND month=?", (season, month)
+    )
+    return cursor.rowcount
 
 
 def rename_opponent_in_match_history(

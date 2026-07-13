@@ -1,6 +1,20 @@
+"""`-revert <match_id>` / `/revert match_id:` (admin only).
+
+Reverts a previously recorded match by its Match ID instead of re-typing
+the original report's players/score/order. Match IDs are random and
+strictly unique per match (see db.match_history_db.next_match_id) and can
+be looked up with `-match_ids`, which exports every recorded match in this
+server to an Excel file.
+
+Unlike the old score-based revert (which had to *guess* the pre-match Elo
+by iterating the report formula backwards), this reads the exact
+elo_init/elo_final that were stored for this match at report time, so the
+revert is always exact - and it deletes that match's two match_history
+rows so it no longer shows up in -history/-match_ids.
+"""
+
 import asyncio
 import logging
-import re
 
 import discord
 from discord import app_commands
@@ -8,9 +22,10 @@ from discord.ext import commands
 
 from db.elo_db import db_connection
 from db.match_history_db import (
+    MatchHistoryRow,
     decrement_player_matches,
     delete_match_history_by_id,
-    find_latest_match_id_for_revert,
+    get_match_history_rows_by_match_id,
     get_player_matches_count,
 )
 from utils import is_admin, is_admin_interaction, sync_league_roles
@@ -22,18 +37,9 @@ logger = logging.getLogger(__name__)
 
 
 class RevertCog(commands.Cog):
-    # Must match ReportingCog exactly
-    EXPECTED_OUTCOME_DIVISOR = 1147.44429731658
-    RAW_GAIN_MULTIPLIER = 20
-    SET_WIN_BONUS = 5
-    SWEEP_REDUCTION_FACTOR = 0.076923
-    BO7_FIXED_BONUS = 2
-
     _REVERT_USAGE = (
-        "- `-revert <player1_id> <p1_score> <p2_score> <player2_id>`\n"
-        "- `-revert <player1_id> <score> <player2_id>` (score: `4-3`, `3:1`, `43`, `4 2`)\n"
-        "Use the exact same IDs, scores, and order as the original `-report`/`-ad_rp` "
-        "that you want to undo."
+        "- `-revert <match_id>`\n"
+        "Use `-match_ids` to look up the Match ID of the match you want to undo."
     )
 
     def __init__(self, bot: commands.Bot):
@@ -53,203 +59,87 @@ class RevertCog(commands.Cog):
             except Exception:
                 pass
 
-    def _parse_combined_score(self, score: str) -> tuple[int, int] | None:
-        stripped = score.strip()
-        match = re.match(r"(\d)\s*(\d)$", stripped) or re.match(
-            r"(\d)\s*[-:]\s*(\d)$", stripped
-        )
-        if not match:
+    @staticmethod
+    def _split_winner_loser(
+        rows: list[MatchHistoryRow],
+    ) -> tuple[MatchHistoryRow, MatchHistoryRow] | None:
+        """Given the 2 match_history rows for one match_id, return
+        (winner_row, loser_row), or None if the data is malformed (e.g. a
+        corrupted/partial match_id with anything other than exactly 2
+        rows, or neither row shows a win)."""
+        if len(rows) != 2:
             return None
-        return int(match.group(1)), int(match.group(2))
-
-    def _parse_revert_args(
-        self, winner_raw_id: int, args: tuple[str, ...]
-    ) -> tuple[int, int, int, int] | None:
-        """Return (winner_id, winner_score, loser_score, loser_id) or None."""
-        if len(args) == 2:
-            score_str, loser_raw = args
-            try:
-                loser_id = int(loser_raw)
-            except ValueError:
-                return None
-            parsed = self._parse_combined_score(score_str)
-            if not parsed:
-                return None
-            s1, s2 = parsed
-            return winner_raw_id, s1, s2, loser_id
-        if len(args) == 3:
-            try:
-                s1, s2, loser_id = int(args[0]), int(args[1]), int(args[2])
-            except ValueError:
-                return None
-            return winner_raw_id, s1, s2, loser_id
+        row_a, row_b = rows
+        if row_a.wins > row_a.losses and row_b.losses > row_b.wins:
+            return row_a, row_b
+        if row_b.wins > row_b.losses and row_a.losses > row_a.wins:
+            return row_b, row_a
         return None
-
-    def _calculate_new_formula(
-        self,
-        winner_elo: int,
-        loser_elo: int,
-        winner_score: int,
-        loser_score: int,
-    ) -> dict:
-        """Exact copy of ReportingCog._calculate_new_formula."""
-        total_games = winner_score + loser_score
-        # Bug #9 fix: guard against zero-division
-        if total_games == 0:
-            raise ValueError("total_games cannot be zero (winner_score + loser_score == 0)")
-        elo_diff = abs(winner_elo - loser_elo)
-
-        expected_lower = 1 / (1 + (10 ** (elo_diff / self.EXPECTED_OUTCOME_DIVISOR)))
-        expected_winner = (
-            1 - expected_lower if winner_elo >= loser_elo else expected_lower
-        )
-        quotient = winner_score / total_games
-
-        raw_gain = (
-            self.RAW_GAIN_MULTIPLIER * total_games * (quotient - expected_winner)
-            + self.SET_WIN_BONUS
-        )
-
-        score_gap = winner_score - loser_score
-        sweep_factor = 1 - (self.SWEEP_REDUCTION_FACTOR * (score_gap - 1))
-        actual_gain = raw_gain * sweep_factor
-
-        bonus_raw = total_games / 4
-        bo7_winner_bonus = self.BO7_FIXED_BONUS if winner_score == 4 else 0
-        bo7_loser_bonus = -self.BO7_FIXED_BONUS if winner_score == 4 else 0
-
-        winner_pre_round = winner_elo + actual_gain + bonus_raw + bo7_winner_bonus
-        loser_pre_round = loser_elo - actual_gain + bonus_raw + bo7_loser_bonus
-
-        return {
-            "total_games": total_games,
-            "new_winner_elo": round(winner_pre_round),
-            "new_loser_elo": round(loser_pre_round),
-        }
-
-    def _recover_pre_match_elos(
-        self,
-        cur_winner_elo: int,
-        cur_loser_elo: int,
-        winner_score: int,
-        loser_score: int,
-        *,
-        max_iter: int = 50,
-    ) -> tuple[int, int]:
-        """
-        Find (pre_winner_elo, pre_loser_elo) such that applying the formula
-        produces exactly (cur_winner_elo, cur_loser_elo).
-        Uses fixed-point iteration; converges in < 20 steps in all real cases.
-        """
-        est_w, est_l = cur_winner_elo, cur_loser_elo
-        for _ in range(max_iter):
-            calc = self._calculate_new_formula(
-                est_w, est_l, winner_score, loser_score,
-            )
-            new_est_w = cur_winner_elo - (calc["new_winner_elo"] - est_w)
-            new_est_l = cur_loser_elo - (calc["new_loser_elo"] - est_l)
-            if new_est_w == est_w and new_est_l == est_l:
-                break
-            est_w, est_l = new_est_w, new_est_l
-        return est_w, est_l
 
     # ------------------------------------------------------------------
     # Core revert implementation
     # ------------------------------------------------------------------
 
-    async def _revert_impl(
-        self,
-        ctx: commands.Context,
-        winner_id: int,
-        winner_score: int,
-        loser_score: int,
-        loser_id: int,
-    ):
-        """Shared implementation for -revert."""
-        # --- Fetch users ---
-        try:
-            winner = await self.bot.fetch_user(winner_id)
-            loser = await self.bot.fetch_user(loser_id)
-        except discord.NotFound:
+    async def _revert_impl(self, ctx: commands.Context, match_id: int):
+        with db_connection(ctx.guild.id) as (_conn, cursor):
+            rows = get_match_history_rows_by_match_id(cursor, match_id)
+
+        if not rows:
             await ctx.send(embed=discord.Embed(
                 title="Revert Error",
-                description="One or both users were not found with the provided Discord IDs.",
-                color=discord.Color.red(),
-            ))
-            return
-        except Exception as e:
-            logger.exception("fetch_user failed in _revert_impl")
-            await ctx.send(embed=discord.Embed(
-                title="Revert Error",
-                description=f"An error occurred: {e}\n{self._REVERT_USAGE}",
+                description=(
+                    f"No match found with Match ID `{match_id}`.\n"
+                    f"Use `-match_ids` to look up valid Match IDs.\n{self._REVERT_USAGE}"
+                ),
                 color=discord.Color.red(),
             ))
             return
 
-        # --- Validate ---
-        if winner_id == loser_id:
+        split = self._split_winner_loser(rows)
+        if split is None:
             await ctx.send(embed=discord.Embed(
                 title="Revert Error",
-                description="A player cannot have a match against themselves.",
+                description=(
+                    f"Match ID `{match_id}` has malformed or incomplete data and "
+                    "cannot be safely reverted automatically."
+                ),
                 color=discord.Color.red(),
             ))
             return
+        winner_row, loser_row = split
 
-        if winner_score < loser_score:
-            winner_score, loser_score = loser_score, winner_score
-            winner, loser = loser, winner
-            winner_id, loser_id = loser_id, winner_id
-
-        if winner_score == loser_score:
-            await ctx.send(embed=discord.Embed(
-                title="Revert Error",
-                description="Scores cannot be equal. There must be a winner.",
-                color=discord.Color.red(),
-            ))
-            return
-
-        if winner_score not in [3, 4]:
-            await ctx.send(embed=discord.Embed(
-                title="Revert Error",
-                description="Invalid match score. Winner's score must be 3 or 4.",
-                color=discord.Color.red(),
-            ))
-            return
-
-        # --- Read DB ---
-        with db_connection(ctx.guild.id) as (conn, cursor):
+        with db_connection(ctx.guild.id) as (_conn, cursor):
             cursor.execute(
-                "SELECT elo, games_won, games_lost, games_played_this_month, name FROM players WHERE id=?",
-                (winner.id,),
+                "SELECT elo, name FROM players WHERE id=?", (winner_row.player_id,)
             )
-            winner_row = cursor.fetchone()
+            winner_player = cursor.fetchone()
             cursor.execute(
-                "SELECT elo, games_won, games_lost, games_played_this_month, name FROM players WHERE id=?",
-                (loser.id,),
+                "SELECT elo, name FROM players WHERE id=?", (loser_row.player_id,)
             )
-            loser_row = cursor.fetchone()
+            loser_player = cursor.fetchone()
 
-        if not winner_row or not loser_row:
-            if not winner_row and not loser_row:
-                desc = f"<@{winner.id}>, <@{loser.id}> are not registered."
-            elif not winner_row:
-                desc = f"<@{winner.id}> is not registered."
-            else:
-                desc = f"<@{loser.id}> is not registered."
+        if not winner_player or not loser_player:
+            missing = []
+            if not winner_player:
+                missing.append(f"<@{winner_row.player_id}>")
+            if not loser_player:
+                missing.append(f"<@{loser_row.player_id}>")
             await ctx.send(embed=discord.Embed(
                 title="Revert Error",
-                description=desc + " Use `-register <name>` to register.",
+                description=(
+                    "Cannot revert: " + ", ".join(missing) +
+                    " is no longer registered."
+                ),
                 color=discord.Color.red(),
             ))
             return
 
-        cur_winner_elo, cur_winner_wins, cur_winner_losses, cur_winner_monthly, winner_name = winner_row
-        cur_loser_elo, cur_loser_wins, cur_loser_losses, cur_loser_monthly, loser_name = loser_row
-        total_games = winner_score + loser_score
+        cur_winner_elo, winner_name = winner_player
+        cur_loser_elo, loser_name = loser_player
 
-        with db_connection(ctx.guild.id) as (conn, cursor):
-            winner_matches = get_player_matches_count(cursor, winner.id)
-            loser_matches = get_player_matches_count(cursor, loser.id)
+        with db_connection(ctx.guild.id) as (_conn, cursor):
+            winner_matches = get_player_matches_count(cursor, winner_row.player_id)
+            loser_matches = get_player_matches_count(cursor, loser_row.player_id)
 
         if winner_matches < 1 or loser_matches < 1:
             low_players = []
@@ -267,46 +157,26 @@ class RevertCog(commands.Cog):
             ))
             return
 
-        # --- Recover pre-match Elos ---
-        pre_winner_elo, pre_loser_elo = self._recover_pre_match_elos(
-            cur_winner_elo, cur_loser_elo,
-            winner_score, loser_score,
-        )
+        target_winner_elo = winner_row.elo_init
+        target_loser_elo = loser_row.elo_init
+        winner_delta = target_winner_elo - cur_winner_elo
+        loser_delta = target_loser_elo - cur_loser_elo
 
-        winner_delta = cur_winner_elo - pre_winner_elo
-        loser_delta = cur_loser_elo - pre_loser_elo
-
-        # Warn if recovered Elos don't reproduce the current ones exactly
-        verify = self._calculate_new_formula(
-            pre_winner_elo, pre_loser_elo,
-            winner_score, loser_score,
-        )
-        has_mismatch = verify["new_winner_elo"] != cur_winner_elo or verify["new_loser_elo"] != cur_loser_elo
-        mismatch_warning = ""
-        if has_mismatch:
-            mismatch_warning = (
-                f"\n\n**Warning:** Current Elo ratings do not exactly match the expected "
-                f"outcome of this score (expected {verify['new_winner_elo']}/{verify['new_loser_elo']}, "
-                f"actual {cur_winner_elo}/{cur_loser_elo}). "
-                "The Elo may have been manually adjusted, or this may not be the most recent match. "
-                "Proceeding will revert based on the recovered values above."
-            )
-
-        # --- Send pending embed ---
-        # Bug #3 fix: if there is a mismatch (iteration didn't converge), use a
-        # red/danger color so the admin clearly sees this is an inexact revert.
-        embed_color = discord.Color.red() if has_mismatch else discord.Color.orange()
         embed = discord.Embed(
             title="Match Revert Pending Confirmation",
             description=(
-                f"Reverting match: **{winner_name}** {winner_score}-{loser_score} **{loser_name}**\n"
+                f"Reverting Match ID `{match_id}`: **{winner_name}** "
+                f"{winner_row.wins}-{winner_row.losses} **{loser_name}**\n"
                 f"**Elo Ratings Preview:**\n"
-                f"{winner_name}: **{pre_winner_elo}** ({cur_winner_elo} {'+'  if -winner_delta >= 0 else '-'} {abs(-winner_delta)})\n"
-                f"{loser_name}: **{pre_loser_elo}** ({cur_loser_elo} {'+' if -loser_delta >= 0 else '-'} {abs(-loser_delta)})\n"
-                f"{mismatch_warning}\n"
-                f"Admin ({ctx.author.mention}), please react with {YES_EMOJI} to confirm or {NO_EMOJI} to cancel within 5 minutes."
+                f"{winner_name}: **{target_winner_elo}** ({cur_winner_elo} "
+                f"{'+' if winner_delta >= 0 else '-'} {abs(winner_delta)})\n"
+                f"{loser_name}: **{target_loser_elo}** ({cur_loser_elo} "
+                f"{'+' if loser_delta >= 0 else '-'} {abs(loser_delta)})\n\n"
+                f"This match will also be deleted from match history.\n"
+                f"Admin ({ctx.author.mention}), please react with {YES_EMOJI} to confirm or "
+                f"{NO_EMOJI} to cancel within 5 minutes."
             ),
-            color=embed_color,
+            color=discord.Color.orange(),
         )
         message = await ctx.send(embed=embed)
         await message.add_reaction(YES_EMOJI)
@@ -350,8 +220,8 @@ class RevertCog(commands.Cog):
 
         # --- Commit revert; close connection before role sync ---
         with db_connection(ctx.guild.id) as (conn, cursor):
-            winner_matches = get_player_matches_count(cursor, winner.id)
-            loser_matches = get_player_matches_count(cursor, loser.id)
+            winner_matches = get_player_matches_count(cursor, winner_row.player_id)
+            loser_matches = get_player_matches_count(cursor, loser_row.player_id)
             if winner_matches < 1 or loser_matches < 1:
                 await ctx.send(embed=discord.Embed(
                     title="Revert Error",
@@ -362,87 +232,66 @@ class RevertCog(commands.Cog):
                 ))
                 return
 
-            match_id = find_latest_match_id_for_revert(
-                cursor,
-                winner.id,
-                loser.id,
-                winner_name,
-                loser_name,
-                winner_score,
-                loser_score,
+            cursor.execute(
+                """
+                UPDATE players
+                SET elo=?,
+                    games_won=MAX(0, games_won - ?),
+                    games_lost=MAX(0, games_lost - ?),
+                    games_played_this_month=MAX(0, games_played_this_month - ?)
+                WHERE id=?
+                """,
+                (
+                    target_winner_elo, winner_row.wins, winner_row.losses,
+                    winner_row.wins + winner_row.losses, winner_row.player_id,
+                ),
             )
+            cursor.execute(
+                """
+                UPDATE players
+                SET elo=?,
+                    games_won=MAX(0, games_won - ?),
+                    games_lost=MAX(0, games_lost - ?),
+                    games_played_this_month=MAX(0, games_played_this_month - ?)
+                WHERE id=?
+                """,
+                (
+                    target_loser_elo, loser_row.wins, loser_row.losses,
+                    loser_row.wins + loser_row.losses, loser_row.player_id,
+                ),
+            )
+            # Reverse h2h_stats additions from the original report - mirrors
+            # add_h2h_match(cursor, row.player_id, row.opponent_name, row.wins, row.losses)
+            # done at report time, for each row.
+            _subtract_h2h_match(cursor, winner_row.player_id, winner_row.opponent_name, winner_row.wins, winner_row.losses)
+            _subtract_h2h_match(cursor, loser_row.player_id, loser_row.opponent_name, loser_row.wins, loser_row.losses)
 
-            cursor.execute(
-                """
-                UPDATE players
-                SET elo=?,
-                    games_won=MAX(0, games_won - ?),
-                    games_lost=MAX(0, games_lost - ?),
-                    games_played_this_month=MAX(0, games_played_this_month - ?)
-                WHERE id=?
-                """,
-                (pre_winner_elo, winner_score, loser_score, total_games, winner.id),
-            )
-            cursor.execute(
-                """
-                UPDATE players
-                SET elo=?,
-                    games_won=MAX(0, games_won - ?),
-                    games_lost=MAX(0, games_lost - ?),
-                    games_played_this_month=MAX(0, games_played_this_month - ?)
-                WHERE id=?
-                """,
-                (pre_loser_elo, loser_score, winner_score, total_games, loser.id),
-            )
-            # Reverse h2h_stats additions from the original report
-            _subtract_h2h_match(cursor, winner.id, loser_name, winner_score, loser_score)
-            _subtract_h2h_match(cursor, loser.id, winner_name, loser_score, winner_score)
-            if match_id is not None:
-                delete_match_history_by_id(cursor, match_id)
-            decrement_player_matches(cursor, winner.id)
-            decrement_player_matches(cursor, loser.id)
+            delete_match_history_by_id(cursor, match_id)
+            decrement_player_matches(cursor, winner_row.player_id)
+            decrement_player_matches(cursor, loser_row.player_id)
             conn.commit()
-        # Connection closed – sync_league_roles can open DB freely
+        # Connection closed - sync_league_roles can open DB freely
 
         lb_cache_invalidate(ctx.guild.id)
         lb_cache_rebuild(self.bot, ctx.guild.id)
 
-        await sync_league_roles(ctx.guild, player_ids=[winner.id, loser.id])
+        await sync_league_roles(ctx.guild, player_ids=[int(winner_row.player_id), int(loser_row.player_id)])
 
         await self._remove_bot_reactions(message)
         await message.edit(embed=discord.Embed(
             title="Match Reverted",
             description=(
-                f"Match reverted: **{winner_name}** {winner_score}-{loser_score} **{loser_name}**\n"
+                f"Match ID `{match_id}` reverted: **{winner_name}** "
+                f"{winner_row.wins}-{winner_row.losses} **{loser_name}**\n"
                 f"Elo Ratings:\n"
-                f"{winner_name}: **{pre_winner_elo}** ({cur_winner_elo} {'+' if -winner_delta >= 0 else '-'} {abs(-winner_delta)})\n"
-                f"{loser_name}: **{pre_loser_elo}** ({cur_loser_elo} {'+' if -loser_delta >= 0 else '-'} {abs(-loser_delta)})"
+                f"{winner_name}: **{target_winner_elo}** ({cur_winner_elo} "
+                f"{'+' if winner_delta >= 0 else '-'} {abs(winner_delta)})\n"
+                f"{loser_name}: **{target_loser_elo}** ({cur_loser_elo} "
+                f"{'+' if loser_delta >= 0 else '-'} {abs(loser_delta)})\n\n"
+                f"This match has been removed from match history."
             ),
             color=discord.Color.green(),
         ))
-
-    # ------------------------------------------------------------------
-    # Arg parsing helper
-    # ------------------------------------------------------------------
-
-    async def _run_revert_command(
-        self,
-        ctx: commands.Context,
-        player1_id: int,
-        args: tuple[str, ...],
-    ):
-        parsed = self._parse_revert_args(player1_id, args)
-        if not parsed:
-            await ctx.send(embed=discord.Embed(
-                title="Revert Error",
-                description=f"Invalid format or score.\n{self._REVERT_USAGE}\nScore examples: `4-3`, `3:1`, `43`, `4 2`.",
-                color=discord.Color.red(),
-            ))
-            return
-        winner_id, winner_score, loser_score, loser_id = parsed
-        await self._revert_impl(
-            ctx, winner_id, winner_score, loser_score, loser_id,
-        )
 
     # ------------------------------------------------------------------
     # Commands
@@ -450,11 +299,11 @@ class RevertCog(commands.Cog):
 
     @commands.command(
         name="revert",
-        help="Revert a previously confirmed match report (admin only). Usage: -revert <player1_id> <p1_score> <p2_score> <player2_id>",
+        help="Revert a previously recorded match by its Match ID (admin only). Usage: -revert <match_id>. Look up IDs with -match_ids.",
     )
     @commands.check(is_admin)
-    async def revert(self, ctx: commands.Context, player1_id: int, *args: str):
-        await self._run_revert_command(ctx, player1_id, args)
+    async def revert(self, ctx: commands.Context, match_id: int):
+        await self._revert_impl(ctx, match_id)
 
     @revert.error
     async def revert_error(self, ctx: commands.Context, error):
@@ -468,6 +317,12 @@ class RevertCog(commands.Cog):
             await ctx.send(embed=discord.Embed(
                 title="Revert Error",
                 description=f"Missing arguments.\n{self._REVERT_USAGE}",
+                color=discord.Color.red(),
+            ))
+        elif isinstance(error, commands.BadArgument):
+            await ctx.send(embed=discord.Embed(
+                title="Revert Error",
+                description=f"Invalid Match ID.\n{self._REVERT_USAGE}",
                 color=discord.Color.red(),
             ))
 
@@ -494,41 +349,19 @@ class RevertCog(commands.Cog):
             return
         raise error
 
-    @app_commands.command(name="revert", description="Revert a previously confirmed match (admin only).")
+    @app_commands.command(name="revert", description="Revert a previously recorded match by its Match ID (admin only).")
     @app_commands.describe(
-        player1_id="First player's Discord ID (same as used in the original report)",
-        p1_score="First player's set score from the original report (0-4)",
-        p2_score="Second player's set score from the original report (0-3)",
-        player2_id="Second player's Discord ID (same as used in the original report)",
+        match_id="The Match ID to revert (look it up with -match_ids)",
     )
     @app_commands.guild_only()
     @app_commands.check(is_admin_interaction)
-    async def slash_revert(
-        self,
-        interaction: discord.Interaction,
-        player1_id: str,
-        p1_score: app_commands.Range[int, 0, 4],
-        p2_score: app_commands.Range[int, 0, 3],
-        player2_id: str,
-    ):
-        try:
-            p1_id, p2_id = int(player1_id), int(player2_id)
-        except ValueError:
-            await interaction.response.send_message(
-                embed=discord.Embed(
-                    title="Revert Error",
-                    description="Invalid Discord ID format.",
-                    color=discord.Color.red(),
-                ),
-                ephemeral=True,
-            )
-            return
+    async def slash_revert(self, interaction: discord.Interaction, match_id: int):
         ctx = SlashContext(interaction)
-        await self._revert_impl(ctx, p1_id, p1_score, p2_score, p2_id)
+        await self._revert_impl(ctx, match_id)
 
 
 # ------------------------------------------------------------------
-# DB helper – subtract from h2h_stats without going below 0
+# DB helper - subtract from h2h_stats without going below 0
 # ------------------------------------------------------------------
 
 def _subtract_h2h_match(cursor, player_id, opponent_name: str, wins: int, losses: int) -> None:

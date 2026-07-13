@@ -49,6 +49,7 @@ from utils.elo_decay import (
     export_month_snapshot,
     export_season_overall,
     post_decay_log,
+    purge_old_match_history,
     season_end_notice,
     send_decay_db_backup,
 )
@@ -94,13 +95,16 @@ async def run_monthly_decay_for_guild(bot: commands.Bot, guild_id: int) -> None:
         if guild is not None:
             lb_cache_rebuild(bot, guild_id)
 
+        purge_log_line = await purge_old_match_history(bot, guild_id, new_season, new_month)
+
         embed = discord.Embed(
             title="Season Complete - Elo Decay Skipped",
             description=(
                 f"{season_end_notice(old_season)}\n\n"
                 f"**Season/Month transition:** Season {old_season}, Month {old_month} "
                 f"-> Season {new_season}, Month {new_month}\n\n"
-                f"**File export log:**\n- {month_log_line}\n- {overall_log_line}"
+                f"**File export log:**\n- {month_log_line}\n- {overall_log_line}\n"
+                f"- {purge_log_line}"
             ),
             color=discord.Color.blue(),
         )
@@ -136,6 +140,8 @@ async def run_monthly_decay_for_guild(bot: commands.Bot, guild_id: int) -> None:
         await sync_league_roles(guild, silent=True, league_changes_out=league_changes)
         await announce_league_changes(guild, league_changes)
 
+    purge_log_line = await purge_old_match_history(bot, guild_id, new_season, new_month)
+
     summary_lines = build_decay_summary_lines(changes)
     summary_chunks = chunk_decay_summary(summary_lines)
 
@@ -146,7 +152,7 @@ async def run_monthly_decay_for_guild(bot: commands.Bot, guild_id: int) -> None:
             "have been reset.\n\n"
             f"**Season/Month transition:** Season {old_season}, Month {old_month} "
             f"-> Season {new_season}, Month {new_month}\n\n"
-            f"**File export log:**\n- {month_log_line}\n\n"
+            f"**File export log:**\n- {month_log_line}\n- {purge_log_line}\n\n"
             f"{summary_chunks[0]}"
         ),
         color=discord.Color.green(),

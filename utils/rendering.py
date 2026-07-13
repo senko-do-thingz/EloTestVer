@@ -1019,6 +1019,7 @@ def render_elo_graph_image(
     prev_avg_gain: int | None = None,
     prev_final_elo: int | None = None,
     prev_month_label: str | None = None,
+    no_prev_data: bool = False,
     compare_series: list[GraphSeriesPoint] | None = None,
     axis_ticks: list[GraphAxisTick] | None = None,
     axis_min: int = 300,
@@ -1137,6 +1138,14 @@ def render_elo_graph_image(
             season_month_text,
             fill=_LB_TEXT_MUTED,
             font=season_font,
+        )
+    if no_prev_data:
+        no_data_font = _load_latin_font(13 * GSCALE, bold=True)
+        draw.text(
+            (title_x, title_h + 4 * GSCALE),
+            "Previous month: No data available",
+            fill=_LB_TEXT_MUTED,
+            font=no_data_font,
         )
 
     # ── stat boxes: AVG. WIN / AVG. LOSS / AVG. GAIN / FINAL ELO ────────
@@ -1386,6 +1395,7 @@ async def render_elo_graph_image_async(
     prev_avg_gain: int | None = None,
     prev_final_elo: int | None = None,
     prev_month_label: str | None = None,
+    no_prev_data: bool = False,
     compare_series: list[GraphSeriesPoint] | None = None,
     axis_ticks: list[GraphAxisTick] | None = None,
     axis_min: int = 300,
@@ -1410,6 +1420,7 @@ async def render_elo_graph_image_async(
         prev_avg_gain=prev_avg_gain,
         prev_final_elo=prev_final_elo,
         prev_month_label=prev_month_label,
+        no_prev_data=no_prev_data,
         compare_series=compare_series,
         axis_ticks=axis_ticks,
         axis_min=axis_min,

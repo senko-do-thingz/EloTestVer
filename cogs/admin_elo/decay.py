@@ -30,6 +30,7 @@ from utils.elo_decay import (
     export_month_snapshot,
     export_season_overall,
     post_decay_log,
+    purge_old_match_history,
     season_end_notice,
     send_decay_db_backup,
 )
@@ -347,12 +348,17 @@ class AdminEloDecayCog(AdminEloBaseCog):
         lb_cache_invalidate(ctx.guild.id)
         lb_cache_rebuild(self.bot, ctx.guild.id)
 
+        purge_log_line = await purge_old_match_history(
+            self.bot, ctx.guild.id, new_season, new_month
+        )
+
         embed.title = "Season Complete - Elo Decay Skipped"
         embed.description = (
             f"{season_end_notice(old_season)}\n\n"
             f"**Season/Month transition:** Season {old_season}, Month {old_month} "
             f"-> Season {new_season}, Month {new_month}\n\n"
-            f"**File export log:**\n- {month_log_line}\n- {overall_log_line}"
+            f"**File export log:**\n- {month_log_line}\n- {overall_log_line}\n"
+            f"- {purge_log_line}"
         )
         embed.color = discord.Color.blue()
 
@@ -396,6 +402,10 @@ class AdminEloDecayCog(AdminEloBaseCog):
         )
         await self._announce_league_changes(ctx.guild, league_changes)
 
+        purge_log_line = await purge_old_match_history(
+            self.bot, ctx.guild.id, new_season, new_month
+        )
+
         summary_lines = self._build_decay_summary_lines(changes)
         summary_chunks = self._chunk_decay_summary(summary_lines)
 
@@ -405,7 +415,7 @@ class AdminEloDecayCog(AdminEloBaseCog):
             "have been reset!\n\n"
             f"**Season/Month transition:** Season {old_season}, Month "
             f"{old_month} -> Season {new_season}, Month {new_month}\n\n"
-            f"**File export log:**\n- {month_log_line}\n\n"
+            f"**File export log:**\n- {month_log_line}\n- {purge_log_line}\n\n"
             f"{summary_chunks[0]}"
         )
         embed.color = discord.Color.green()
