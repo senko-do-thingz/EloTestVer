@@ -183,6 +183,8 @@ class ReportingCog(commands.Cog):
 
             winner_score = int(match.group(1))
             loser_score = int(match.group(2))
+            if winner_score == loser_score:
+                return "Scores cannot be equal. There must be a winner."
             winner, loser = player1, None
 
             try:

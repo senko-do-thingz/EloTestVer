@@ -192,3 +192,131 @@ class TestFontCaching:
         b = _load_cjk_font(42)
         # Even if None (no CJK font in env), both must be the same object
         assert a is b
+
+# ---------------------------------------------------------------------------
+# render_elo_graph_image
+# ---------------------------------------------------------------------------
+
+SAMPLE_GRAPH_SERIES = [
+    (0.0, 480),
+    (0.2, 520),
+    (0.4, 505),
+    (0.6, 560),
+    (0.8, 610),
+]
+
+SAMPLE_AXIS_TICKS = [
+    (0.0, "06-30"),
+    (0.2, "07-01"),
+    (0.4, "07-02"),
+    (0.6, "07-03"),
+    (0.8, "07-04"),
+    (1.0, "07-05"),
+]
+
+
+class TestRenderEloGraphImage:
+    def test_returns_bytesio(self):
+        from utils.rendering import render_elo_graph_image
+        buf = render_elo_graph_image(SAMPLE_GRAPH_SERIES, title="Test Graph")
+        assert isinstance(buf, io.BytesIO)
+
+    def test_valid_png(self):
+        from utils.rendering import render_elo_graph_image
+        buf = render_elo_graph_image(SAMPLE_GRAPH_SERIES, title="Test Graph")
+        img = _open_buf(buf)
+        assert img.format == "PNG"
+
+    def test_default_width(self):
+        from utils.rendering import render_elo_graph_image
+        buf = render_elo_graph_image(SAMPLE_GRAPH_SERIES, title="Test Graph")
+        img = _open_buf(buf)
+        # Default width=660, SCALE=2 -> expected pixel width 1320
+        assert img.size[0] == 1320
+
+    def test_custom_width(self):
+        from utils.rendering import render_elo_graph_image
+        buf = render_elo_graph_image(SAMPLE_GRAPH_SERIES, title="Test Graph", width=500)
+        img = _open_buf(buf)
+        assert img.size[0] == 1000
+
+    def test_empty_series_does_not_raise(self):
+        from utils.rendering import render_elo_graph_image
+        buf = render_elo_graph_image([], title="Empty")
+        assert _open_buf(buf).format == "PNG"
+
+    def test_single_point_series(self):
+        from utils.rendering import render_elo_graph_image
+        buf = render_elo_graph_image([(0.5, 500)], title="Single Point")
+        assert _open_buf(buf).format == "PNG"
+
+    def test_axis_ticks_render_without_raising(self):
+        from utils.rendering import render_elo_graph_image
+        buf = render_elo_graph_image(
+            SAMPLE_GRAPH_SERIES, title="With axis ticks", axis_ticks=SAMPLE_AXIS_TICKS
+        )
+        assert _open_buf(buf).format == "PNG"
+
+    def test_no_axis_ticks_still_renders_line(self):
+        # Without axis_ticks, the line itself must still render (just
+        # without x-axis day labels).
+        from utils.rendering import render_elo_graph_image
+        buf = render_elo_graph_image(SAMPLE_GRAPH_SERIES, title="No axis ticks")
+        assert _open_buf(buf).format == "PNG"
+
+    def test_season_month_text_grows_height(self):
+        # A dedicated row is reserved for season_month_text, so a card
+        # with it should be taller than one without (see the layout fix
+        # that previously let this text overlap the stat boxes).
+        from utils.rendering import render_elo_graph_image
+        buf_without = render_elo_graph_image(SAMPLE_GRAPH_SERIES, title="No season text")
+        buf_with = render_elo_graph_image(
+            SAMPLE_GRAPH_SERIES, title="With season text", season_month_text="Season: 1, Month: 2"
+        )
+        h_without = _open_buf(buf_without).size[1]
+        h_with = _open_buf(buf_with).size[1]
+        assert h_with > h_without
+
+    def test_comparison_values_do_not_raise(self):
+        from utils.rendering import render_elo_graph_image
+        buf = render_elo_graph_image(
+            SAMPLE_GRAPH_SERIES,
+            title="With comparison",
+            avg_win=42,
+            avg_loss=-31,
+            avg_gain=11,
+            final_elo=610,
+            prev_avg_win=38,
+            prev_avg_loss=-29,
+            prev_avg_gain=9,
+            prev_final_elo=480,
+            prev_month_label="S1M2",
+        )
+        assert _open_buf(buf).format == "PNG"
+
+    def test_many_points_no_overlap_crash(self):
+        from utils.rendering import render_elo_graph_image
+        series = [(d / 28, 500 + d) for d in range(29)]
+        axis_ticks = [(d / 28, f"07-{d + 1:02d}") for d in range(29)]
+        buf = render_elo_graph_image(series, title="Many Points", axis_ticks=axis_ticks)
+        assert _open_buf(buf).format == "PNG"
+
+    def test_buf_is_seeked_to_zero(self):
+        from utils.rendering import render_elo_graph_image
+        buf = render_elo_graph_image(SAMPLE_GRAPH_SERIES, title="Seek Test")
+        data = buf.read()
+        assert data[:4] == b"\x89PNG"
+
+
+class TestRenderEloGraphImageAsync:
+    def test_async_returns_same_result(self):
+        from utils.rendering import render_elo_graph_image, render_elo_graph_image_async
+
+        buf_sync = render_elo_graph_image(SAMPLE_GRAPH_SERIES, title="Sync")
+        buf_async = asyncio.get_event_loop().run_until_complete(
+            render_elo_graph_image_async(SAMPLE_GRAPH_SERIES, title="Async")
+        )
+        img_sync = _open_buf(buf_sync)
+        img_async = _open_buf(buf_async)
+        assert img_sync.size == img_async.size
+        assert img_async.format == "PNG"

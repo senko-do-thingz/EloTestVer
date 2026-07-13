@@ -1,7 +1,7 @@
 import os
 import discord
 from discord.ext import commands
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from config import YES_EMOJI, NO_EMOJI
 from db import (
     counting_db,
@@ -44,7 +44,7 @@ class Counting(commands.Cog):
                 if last_count is None:
                     continue
                 self.user_cooldowns[(guild_id, user_id)] = datetime.fromtimestamp(
-                    float(last_count)
+                    float(last_count), tz=timezone.utc
                 )
 
     def save_channel_state(self, guild_id: int, channel_id: int):
@@ -170,7 +170,7 @@ class Counting(commands.Cog):
 
         last_time = self.user_cooldowns[key]
         cooldown_end = last_time + timedelta(days=1)
-        remaining = cooldown_end - datetime.now()
+        remaining = cooldown_end - datetime.now(timezone.utc)
 
         if remaining.total_seconds() <= 0:
             return None
@@ -184,14 +184,14 @@ class Counting(commands.Cog):
             return False
 
         last_time = self.user_cooldowns[key]
-        if datetime.now() - last_time >= timedelta(days=1):
+        if datetime.now(timezone.utc) - last_time >= timedelta(days=1):
             return False
 
         return True
 
     def set_user_cooldown(self, guild_id: int, user_id: int):
         """Record the current time as the user's last count timestamp."""
-        now = datetime.now()
+        now = datetime.now(timezone.utc)
         self.user_cooldowns[(guild_id, user_id)] = now
         self.save_user_cooldown(guild_id, user_id, now)
 

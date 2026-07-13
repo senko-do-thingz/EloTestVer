@@ -57,6 +57,11 @@ def _parse_expanded_args(args: str) -> list[tuple[int, list[int]]] | None:
     2, 3). A token with no "m" chunks (e.g. "s2") requests that season's
     Overall stats.
 
+    Duplicate months within a token (e.g. "s1m1m1") are de-duplicated,
+    keeping the first occurrence's position - otherwise the same month's
+    directory would be read (and its wins/losses/elo counted) once per
+    repetition further downstream.
+
     Returns None if any token doesn't match the "s<num>[m<num>...]" shape,
     so the caller can show a format-specific error.
     """
@@ -68,7 +73,13 @@ def _parse_expanded_args(args: str) -> list[tuple[int, list[int]]] | None:
         if not match:
             return None
         season = int(match.group(1))
-        months = [int(m) for m in _EXPANDED_MONTH_RE.findall(match.group(2) or "")]
+        months: list[int] = []
+        seen_months: set[int] = set()
+        for m in _EXPANDED_MONTH_RE.findall(match.group(2) or ""):
+            month = int(m)
+            if month not in seen_months:
+                seen_months.add(month)
+                months.append(month)
         groups.append((season, months))
 
     return groups
@@ -770,13 +781,22 @@ class StatsCog(commands.GroupCog, name="stats", description="View player statist
             return
 
         # Otherwise: several season/month entries were requested -> average
-        # Elo and Win Rate, sum Wins and Losses across all of them.
-        all_dirs = [d for _, dirs, _ in resolved_entries for d in dirs]
+        # Elo, sum Wins and Losses, and recompute Win Rate from those summed
+        # totals (see the comment further below for why it isn't averaged).
+        #
+        # Deduplicated (keeping first occurrence) because _parse_expanded_args
+        # only de-dupes months *within* a single token (e.g. "s1m1m1"), not
+        # across separate tokens - input like "s1m1m2 s1m2m3" would otherwise
+        # resolve to the same "Season 1/Month 2" directory twice, silently
+        # double-counting that month's wins/losses and skewing the Elo
+        # average toward it.
+        all_dirs = list(
+            dict.fromkeys(d for _, dirs, _ in resolved_entries for d in dirs)
+        )
 
         elo_values: list[float] = []
         wins_total = 0
         losses_total = 0
-        win_rate_values: list[float] = []
         any_data_found = False
 
         for dir_path in all_dirs:
@@ -803,7 +823,6 @@ class StatsCog(commands.GroupCog, name="stats", description="View player statist
                 losses_total += losses
                 any_data_found = True
             if win_rate is not None:
-                win_rate_values.append(win_rate)
                 any_data_found = True
 
         if not any_data_found:
@@ -820,16 +839,23 @@ class StatsCog(commands.GroupCog, name="stats", description="View player statist
             return
 
         elo_avg = sum(elo_values) / len(elo_values) if elo_values else None
-        win_rate_avg = (
-            sum(win_rate_values) / len(win_rate_values) if win_rate_values else None
-        )
+        # Win Rate is recalculated from the summed wins/losses (not averaged
+        # from each period's already-computed percentage): averaging
+        # percentages directly would weight a low-sample-size month the
+        # same as a high-sample-size one, e.g. 90% (from 90W/10L) and 50%
+        # (from 1W/1L) averaging to 70% even though the combined record is
+        # 91W/11L (~89.2%). Since wins_total/losses_total are already exact
+        # sums across all requested periods, deriving Win Rate from them
+        # keeps it consistent with the Wins/Losses shown right next to it.
+        total_games = wins_total + losses_total
+        win_rate_total = (wins_total / total_games * 100) if total_games > 0 else None
 
         suffix = " + ".join(label for label, _, _ in resolved_entries)
 
         elo_line = f"🔥 Elo: {elo_avg:.2f}" if elo_avg is not None else "🔥 Elo: -"
         win_rate_line = (
-            f"📊 Win Rate: {win_rate_avg:.2f}%"
-            if win_rate_avg is not None
+            f"📊 Win Rate: {win_rate_total:.2f}%"
+            if win_rate_total is not None
             else "📊 Win Rate: -"
         )
 

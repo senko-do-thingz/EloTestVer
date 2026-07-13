@@ -190,6 +190,33 @@ def get_full_match_history_by_season_month(
     return [_row_from_tuple(row) for row in cursor.fetchall()]
 
 
+def compute_streak_labels(rows: list[MatchHistoryRow]) -> list[int | None]:
+    """Group consecutive same-result (win/loss) rows into streaks.
+
+    ``rows`` must be ordered most-recent-first (as returned by every query
+    in this module). Only the first (most recent) row of each streak group
+    gets the streak's length as its label; the rest are left as None.
+
+    This MUST be computed over a player's full month of matches, not a
+    paginated slice - a streak that spans a page boundary would otherwise
+    be undercounted on each page, and would disagree with the "Best Streak"
+    badge (get_best_streak_by_season_month) and the /export history sheet,
+    both of which already use the full month. Callers that only want to
+    display one page should slice the *result* of this function, not call
+    it with a pre-sliced row list.
+    """
+    labels: list[int | None] = [None] * len(rows)
+    i = 0
+    while i < len(rows):
+        result = rows[i].wins > rows[i].losses
+        j = i
+        while j < len(rows) and (rows[j].wins > rows[j].losses) == result:
+            j += 1
+        labels[i] = j - i
+        i = j
+    return labels
+
+
 def get_best_streak_by_season_month(
     cursor: sqlite3.Cursor,
     player_id: str | int,
@@ -337,3 +364,20 @@ def find_latest_match_id_for_revert(
 
 def delete_match_history_by_id(cursor: sqlite3.Cursor, match_id: int) -> None:
     cursor.execute("DELETE FROM match_history WHERE match_id=?", (match_id,))
+
+
+def rename_opponent_in_match_history(
+    cursor: sqlite3.Cursor, old_name: str, new_name: str
+) -> None:
+    """Rename opponent_name in match_history rows when a player's display
+    name changes, so -history keeps showing a renamed player's current
+    name for matches recorded before the rename - mirrors
+    `rename_opponent_in_h2h`. Unlike h2h_stats, match_history has no
+    per-(player, opponent_name) uniqueness to worry about, so a plain
+    UPDATE is enough."""
+    if not old_name or not new_name or old_name == new_name:
+        return
+    cursor.execute(
+        "UPDATE match_history SET opponent_name=? WHERE opponent_name=?",
+        (new_name, old_name),
+    )

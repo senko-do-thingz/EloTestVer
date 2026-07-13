@@ -29,6 +29,7 @@ from utils.elo_decay import (
     chunk_decay_summary,
     export_month_snapshot,
     export_season_overall,
+    post_decay_log,
     season_end_notice,
     send_decay_db_backup,
 )
@@ -289,7 +290,7 @@ class AdminEloDecayCog(AdminEloBaseCog):
                         ctx, embed, pre_season, pre_month
                     )
                 else:
-                    await self._run_regular_decay(ctx, embed)
+                    await self._run_regular_decay(ctx, embed, pre_season, pre_month)
 
                 await bot_log(
                     ctx.bot,
@@ -355,10 +356,29 @@ class AdminEloDecayCog(AdminEloBaseCog):
         )
         embed.color = discord.Color.blue()
 
+        # Also post this change log to the channel configured for THIS
+        # guild via -decay_setup, if any - previously only the automatic
+        # monthly task did this, so a manual -decay silently never reached
+        # the configured channel no matter which guild it was set up in.
+        await post_decay_log(self.bot, ctx.guild.id, embed)
+
     async def _run_regular_decay(
-        self, ctx: commands.Context, embed: discord.Embed
+        self,
+        ctx: commands.Context,
+        embed: discord.Embed,
+        pre_season: int,
+        pre_month: int,
     ) -> None:
         """Apply Elo decay + reset monthly counters for a normal month."""
+        # Export the current standings snapshot into lb/<id>/Season n/Month m/
+        # BEFORE decay/reset touches the data, exactly like the automatic
+        # monthly task (decay_auto.py) does - otherwise the archived files
+        # would show post-decay Elo and 0 games played instead of the
+        # actual monthly performance.
+        _, month_log_line = await export_month_snapshot(
+            ctx.guild.id, pre_season, pre_month
+        )
+
         # Bug #8 fix: decay + monthly reset in a single transaction so a
         # mid-operation crash cannot leave decay applied without the reset.
         with db_connection(ctx.guild.id) as (conn, cursor):
@@ -385,20 +405,27 @@ class AdminEloDecayCog(AdminEloBaseCog):
             "have been reset!\n\n"
             f"**Season/Month transition:** Season {old_season}, Month "
             f"{old_month} -> Season {new_season}, Month {new_month}\n\n"
+            f"**File export log:**\n- {month_log_line}\n\n"
             f"{summary_chunks[0]}"
         )
         embed.color = discord.Color.green()
 
+        # Also post this change log to the channel configured for THIS
+        # guild via -decay_setup, if any - previously only the automatic
+        # monthly task did this, so a manual -decay silently never reached
+        # the configured channel no matter which guild it was set up in.
+        await post_decay_log(self.bot, ctx.guild.id, embed)
+
         # If the per-player summary didn't fit in one embed, send the
         # rest as follow-up messages instead of truncating it.
         for chunk in summary_chunks[1:]:
-            await ctx.send(
-                embed=discord.Embed(
-                    title="Elo Decay Applied (cont.)",
-                    description=chunk,
-                    color=discord.Color.green(),
-                )
+            cont_embed = discord.Embed(
+                title="Elo Decay Applied (cont.)",
+                description=chunk,
+                color=discord.Color.green(),
             )
+            await ctx.send(embed=cont_embed)
+            await post_decay_log(self.bot, ctx.guild.id, cont_embed)
 
     @commands.command(help="Reset Elo for all players to 500 (admin only).")
     @commands.check(is_admin)

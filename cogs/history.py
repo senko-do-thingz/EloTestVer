@@ -17,12 +17,20 @@ from discord.ext import commands
 
 from db.elo_db import db_connection, get_season_month
 from db.match_history_db import (
+    compute_streak_labels,
     count_player_match_history_by_season_month,
-    get_best_streak_by_season_month,
+    get_full_match_history_by_season_month,
     get_match_history_by_season_month,
     get_months_with_history,
 )
-from utils import render_history_image_async
+from utils import (
+    build_calendar_series,
+    build_match_series,
+    compute_month_averages,
+    render_elo_graph_image_async,
+    render_history_image_async,
+    truncate_cjk_name,
+)
 from utils.slash_ctx import SlashContext
 
 # One page shows 10 matches. Match history storage is unbounded (see
@@ -35,6 +43,27 @@ ACCENT_COLOR = discord.Color.dark_grey()
 # How long a user has to reply with a month number when /history season:<n>
 # matches more than one month (see HistoryCog._prompt_for_month below).
 MONTH_REPLY_TIMEOUT = 300.0
+
+
+def _previous_season_month(
+    cursor, player_id: str | int, season: int, month: int
+) -> tuple[int, int] | None:
+    """Resolve the (season, month) immediately before the given one, for
+    this specific player, based on actual match_history data (not the
+    server's configured max_month, which may be unset or may not reflect
+    what a given player actually played through).
+
+    Returns None if there is no earlier season/month with data - e.g. this
+    is the player's very first month.
+    """
+    if month > 1:
+        return season, month - 1
+    if season > 1:
+        prev_season = season - 1
+        months = get_months_with_history(cursor, player_id, prev_season)
+        if months:
+            return prev_season, max(months)
+    return None
 
 
 def _footer_text(last_updated: datetime) -> str:
@@ -73,6 +102,22 @@ class HistoryRefreshButton(discord.ui.Button):
         await self.custom_view.update_history(interaction)
 
 
+class HistoryGraphToggleButton(discord.ui.Button):
+    """Switches HistoryView between the table view ("History") and the
+    Elo line-chart view ("Graph"). The label flips to "Overview" while on
+    the graph so tapping it again returns to the original History table."""
+
+    def __init__(self, custom_view: "HistoryView"):
+        super().__init__(style=discord.ButtonStyle.primary, label="Graph")
+        self.custom_view = custom_view
+
+    async def callback(self, interaction: discord.Interaction):
+        view = self.custom_view
+        view.mode = "graph" if view.mode == "history" else "history"
+        self.label = "Overview" if view.mode == "graph" else "Graph"
+        await view.update_history(interaction)
+
+
 # HistoryView is a LayoutView (Components V2), mirroring the leaderboard/stats
 # pattern: Refresh sits INSIDE the colored border as a Section accessory
 # (like an OwO card), with Prev/Next in their own action row underneath.
@@ -96,13 +141,17 @@ class HistoryView(discord.ui.LayoutView):
         self.total_pages = 1
         self.last_updated = datetime.now(timezone.utc)
         self.message = None
+        # "history" shows the paginated match table; "graph" shows the Elo
+        # line chart for the whole season/month. Toggled by graph_button.
+        self.mode = "history"
 
         self.prev_button = HistoryPreviousPageButton(self)
         self.next_button = HistoryNextPageButton(self)
         self.refresh_button = HistoryRefreshButton(self)
+        self.graph_button = HistoryGraphToggleButton(self)
 
     async def on_timeout(self) -> None:
-        for item in (self.prev_button, self.next_button, self.refresh_button):
+        for item in (self.prev_button, self.next_button, self.refresh_button, self.graph_button):
             item.disabled = True
         if self.message:
             try:
@@ -127,11 +176,19 @@ class HistoryView(discord.ui.LayoutView):
             )
         )
         self.add_item(container)
-        self.add_item(discord.ui.ActionRow(self.prev_button, self.next_button))
+        if self.mode == "graph":
+            # Pagination doesn't apply to the whole-month graph view, so hide
+            # Prev/Next entirely instead of just disabling them.
+            self.add_item(discord.ui.ActionRow(self.graph_button))
+        else:
+            self.add_item(discord.ui.ActionRow(self.prev_button, self.next_button, self.graph_button))
 
     async def update_history(self, interaction_or_target) -> None:
         with db_connection(self.ctx.guild.id) as (_conn, cursor):
-            await self._render_history(interaction_or_target, cursor)
+            if self.mode == "graph":
+                await self._render_graph(interaction_or_target, cursor)
+            else:
+                await self._render_history(interaction_or_target, cursor)
 
     async def _send_or_edit(self, interaction_or_target, file: discord.File) -> None:
         if isinstance(interaction_or_target, discord.Interaction):
@@ -206,12 +263,20 @@ class HistoryView(discord.ui.LayoutView):
         history_rows = get_match_history_by_season_month(
             cursor, self.target.id, self.season, self.month, PAGE_SIZE, offset
         )
-        # Month-scoped Best Streak: computed purely from this season/month's
-        # match_history rows, deliberately separate from the player-level
-        # win_streak/highest_win_streak fields that get_win_streak() reads
-        # (those are shared with /stats and track an all-time running streak).
-        highest_streak = get_best_streak_by_season_month(
+
+        # Streak labels (the small number drawn next to each row) and the
+        # "Best Streak" badge must both be computed from the FULL month,
+        # not just this page - a streak spanning a page boundary would
+        # otherwise look shorter than it really is on every page it
+        # touches, and would disagree with /export history's numbers,
+        # which already use the full month.
+        full_month_rows = get_full_match_history_by_season_month(
             cursor, self.target.id, self.season, self.month
+        )
+        full_streak_labels = compute_streak_labels(full_month_rows)
+        page_streak_labels = full_streak_labels[offset : offset + len(history_rows)]
+        highest_streak = max(
+            (label for label in full_streak_labels if label is not None), default=0
         )
 
         self.prev_button.disabled = self.page == 0
@@ -234,7 +299,7 @@ class HistoryView(discord.ui.LayoutView):
         avatar_bytes = await self._fetch_avatar_bytes()
         buf = await render_history_image_async(
             image_rows,
-            title=f"{player_name}'s Match History",
+            title=f"{truncate_cjk_name(player_name)}'s Match History",
             summary=(
                 f"Page {self.page + 1}/{self.total_pages} - "
                 f"showing {len(history_rows)} of {total_matches} match(es)"
@@ -243,6 +308,7 @@ class HistoryView(discord.ui.LayoutView):
             avatar_bytes=avatar_bytes,
             season_month_text=f"Season: {self.season}, Month: {self.month}",
             year_text=f"Year: {datetime.now(timezone.utc).year}",
+            streak_labels=page_streak_labels,
         )
         filename = "history.png"
         file = discord.File(buf, filename=filename)
@@ -255,6 +321,157 @@ class HistoryView(discord.ui.LayoutView):
             return await self.target.display_avatar.read()
         except Exception:
             return None
+
+    async def _render_graph(self, interaction_or_target, cursor) -> None:
+        cursor.execute("SELECT name FROM players WHERE id=?", (self.target.id,))
+        row = cursor.fetchone()
+        if not row:
+            await self._send_error(
+                interaction_or_target,
+                discord.Embed(
+                    title="Player Not Registered",
+                    description=(
+                        f"{self.target.mention} is not registered. "
+                        "Use `-register <n>` to sign up!"
+                    ),
+                    color=discord.Color.red(),
+                ),
+            )
+            return
+
+        player_name = row[0]
+
+        # Full month, chronological (oldest first) - both the averages and
+        # the daily series are built from this same set of actual matches.
+        full_month_rows_desc = get_full_match_history_by_season_month(
+            cursor, self.target.id, self.season, self.month
+        )
+        if not full_month_rows_desc:
+            await self._send_error(
+                interaction_or_target,
+                discord.Embed(
+                    title="Elo Graph",
+                    description=(
+                        f"**{player_name}** has no recorded matches in "
+                        f"Season {self.season}, Month {self.month}."
+                    ),
+                    color=discord.Color.blue(),
+                ),
+            )
+            return
+
+        rows_chronological = list(reversed(full_month_rows_desc))
+        averages = compute_month_averages(rows_chronological)
+
+        # Previous month's carry-over anchor point (the elo the player
+        # carried INTO this month, before any -decay/-reset adjustment) and
+        # previous month's averages, for the blue "vs last month" figures.
+        anchor_elo = None
+        anchor_date = None
+        prev_averages = None
+        prev_month_label = None
+        compare_series: list[tuple[str, int]] | None = None
+        prev = _previous_season_month(cursor, self.target.id, self.season, self.month)
+        if prev is not None:
+            prev_season, prev_month = prev
+            prev_rows_desc = get_full_match_history_by_season_month(
+                cursor, self.target.id, prev_season, prev_month
+            )
+            if prev_rows_desc:
+                anchor_row = prev_rows_desc[0]  # most recent = last match of prev month
+                anchor_elo = anchor_row.elo_final
+                anchor_date = datetime.fromtimestamp(
+                    anchor_row.played_at, tz=timezone.utc
+                ).date()
+                prev_averages = compute_month_averages(list(reversed(prev_rows_desc)))
+                prev_month_label = f"S{prev_season}M{prev_month}"
+
+                # The previous month's OWN match series, drawn as the
+                # dashed "vs last month" comparison line - anchored at
+                # ITS carry-over elo (two months back) the same way the
+                # current month's line is, so both lines start the same
+                # way. Also computed per SET, not per calendar day.
+                prev_prev = _previous_season_month(
+                    cursor, self.target.id, prev_season, prev_month
+                )
+                prev_anchor_elo = None
+                prev_anchor_date = None
+                if prev_prev is not None:
+                    pp_season, pp_month = prev_prev
+                    pp_rows_desc = get_full_match_history_by_season_month(
+                        cursor, self.target.id, pp_season, pp_month
+                    )
+                    if pp_rows_desc:
+                        pp_anchor_row = pp_rows_desc[0]
+                        prev_anchor_elo = pp_anchor_row.elo_final
+                        prev_anchor_date = datetime.fromtimestamp(
+                            pp_anchor_row.played_at, tz=timezone.utc
+                        ).date()
+                compare_series = build_match_series(
+                    list(reversed(prev_rows_desc)),
+                    anchor_elo=prev_anchor_elo,
+                    anchor_date=prev_anchor_date,
+                )
+
+        # The elo the line should start FROM: the real previous month's
+        # carry-over elo when we have one (anchor_elo above), otherwise
+        # fall back to this month's own first match's elo_init - the
+        # elo the player already had before that first match - so the
+        # graph still visibly starts from a real value instead of
+        # jumping straight to the first match's post-match result (e.g.
+        # a brand new season/month with no prior data). This fallback is
+        # a separate variable from anchor_elo/anchor_date on purpose: it
+        # must never be used as prev_final_elo below, since there is no
+        # actual previous month to compare against in that case.
+        series_anchor_elo = anchor_elo
+        series_anchor_date = anchor_date
+        anchor_before_first_match = False
+        if series_anchor_elo is None:
+            series_anchor_elo = rows_chronological[0].elo_init
+            anchor_before_first_match = True
+
+        # x-axis runs on a real calendar timeline (last day of the
+        # previous month through the last day of this month), with one
+        # point per SET (match) actually played - see
+        # build_calendar_series(). No "not played" days are fabricated
+        # in the elo line itself; axis_ticks separately pre-generates a
+        # label for every calendar day (including days with no match
+        # yet) so the full month is laid out ahead of time.
+        series, axis_ticks = build_calendar_series(
+            rows_chronological,
+            anchor_elo=series_anchor_elo,
+            anchor_date=series_anchor_date,
+            anchor_before_first_match=anchor_before_first_match,
+        )
+
+        avatar_bytes = await self._fetch_avatar_bytes()
+        buf = await render_elo_graph_image_async(
+            series,
+            title=f"{truncate_cjk_name(player_name)}'s Elo Graph",
+            avatar_bytes=avatar_bytes,
+            season_month_text=f"Season: {self.season}, Month: {self.month}",
+            year_text=f"Year: {datetime.now(timezone.utc).year}",
+            avg_win=averages.avg_win,
+            avg_loss=averages.avg_loss,
+            avg_gain=averages.avg_gain,
+            final_elo=averages.final_elo,
+            prev_avg_win=prev_averages.avg_win if prev_averages else None,
+            prev_avg_loss=prev_averages.avg_loss if prev_averages else None,
+            prev_avg_gain=prev_averages.avg_gain if prev_averages else None,
+            prev_final_elo=anchor_elo,
+            prev_month_label=prev_month_label,
+            compare_series=compare_series,
+            axis_ticks=axis_ticks,
+        )
+        filename = "elo_graph.png"
+        file = discord.File(buf, filename=filename)
+
+        # Pagination doesn't apply to the whole-month graph view.
+        self.prev_button.disabled = True
+        self.next_button.disabled = True
+
+        self._rebuild_layout(filename)
+        await self._send_or_edit(interaction_or_target, file)
 
 
 class HistoryCog(commands.Cog):

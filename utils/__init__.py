@@ -15,6 +15,7 @@ from db.h2h_db import (  # noqa: F401
     get_opponent_games,
     rename_opponent_in_h2h,
 )
+from db.match_history_db import rename_opponent_in_match_history
 from .lb_archive import (  # noqa: F401
     LB_ARCHIVE_FILES,
     format_leaderboard_export_line,
@@ -43,21 +44,32 @@ from .league import (  # noqa: F401
 from .rendering import (  # noqa: F401
     render_compare_image,
     render_compare_image_async,
+    render_elo_graph_image,
+    render_elo_graph_image_async,
     render_history_image,
     render_history_image_async,
     render_leaderboard_image,
     render_leaderboard_image_async,
+    truncate_cjk_name,
+)
+from .elo_graph import (  # noqa: F401
+    build_calendar_series,
+    build_daily_series,
+    build_match_series,
+    compute_month_averages,
 )
 from .logger import bot_log, PRIVATE_GUILD_ID  # noqa: F401
 
 
 def sync_against_names(cursor, old_name: str, new_name: str) -> None:
     """
-    Rename opponent_name in h2h_stats when a player's display name changes.
+    Rename opponent_name in h2h_stats and match_history when a player's
+    display name changes.
 
     Caller is responsible for committing the transaction.
     """
     rename_opponent_in_h2h(cursor, old_name, new_name)
+    rename_opponent_in_match_history(cursor, old_name, new_name)
 
 
 def format_relative_time(dt: datetime) -> str:

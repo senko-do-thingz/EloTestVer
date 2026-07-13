@@ -36,7 +36,6 @@ from discord.ext import commands, tasks
 from db.elo_db import (
     advance_season_month_cursor,
     db_connection,
-    get_decay_log_channel_id,
     get_max_month,
     get_season_month,
     list_all_guild_ids,
@@ -49,6 +48,7 @@ from utils.elo_decay import (
     chunk_decay_summary,
     export_month_snapshot,
     export_season_overall,
+    post_decay_log,
     season_end_notice,
     send_decay_db_backup,
 )
@@ -61,24 +61,6 @@ from utils.logger import bot_log
 # A few minutes after daily_streak_refresh.py's midnight task, so both never
 # race for the same guild databases.
 _MONTHLY_CHECK_UTC = dt.time(hour=0, minute=10, second=0, tzinfo=dt.timezone.utc)
-
-
-async def _post_decay_log(bot: commands.Bot, guild_id: int, embed: discord.Embed) -> None:
-    channel_id = get_decay_log_channel_id(guild_id)
-    if channel_id is None:
-        return
-
-    channel = bot.get_channel(channel_id)
-    if channel is None:
-        try:
-            channel = await bot.fetch_channel(channel_id)
-        except Exception:
-            return
-
-    try:
-        await channel.send(embed=embed)
-    except Exception:
-        pass
 
 
 async def run_monthly_decay_for_guild(bot: commands.Bot, guild_id: int) -> None:
@@ -122,7 +104,7 @@ async def run_monthly_decay_for_guild(bot: commands.Bot, guild_id: int) -> None:
             ),
             color=discord.Color.blue(),
         )
-        await _post_decay_log(bot, guild_id, embed)
+        await post_decay_log(bot, guild_id, embed)
         await bot_log(
             bot,
             guild_id,
@@ -169,9 +151,9 @@ async def run_monthly_decay_for_guild(bot: commands.Bot, guild_id: int) -> None:
         ),
         color=discord.Color.green(),
     )
-    await _post_decay_log(bot, guild_id, embed)
+    await post_decay_log(bot, guild_id, embed)
     for chunk in summary_chunks[1:]:
-        await _post_decay_log(
+        await post_decay_log(
             bot,
             guild_id,
             discord.Embed(

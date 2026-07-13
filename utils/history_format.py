@@ -6,6 +6,35 @@ from datetime import datetime, timezone
 
 from db.match_history_db import MatchHistoryRow
 
+# Cap on how many characters of an opponent's display name are shown in a
+# history row. Discord names can run 30+ characters, which would otherwise
+# stretch every line of the monospace table (and the per-match card titles)
+# well past what's comfortable to read, especially on mobile. 20 keeps most
+# real names intact while still bounding the handful of outliers that would
+# dominate the row, and leaves enough room next to the other fixed-width
+# columns (Date, Wins, Loses, +/-, INIT, FINAL) that the table stays legible
+# without wrapping.
+DEFAULT_OPPONENT_NAME_MAX_LENGTH = 20
+
+
+def truncate_display_name(
+    name: str, max_length: int = DEFAULT_OPPONENT_NAME_MAX_LENGTH
+) -> str:
+    """Truncate a Discord display name for compact display in a history
+    row, appending a single ellipsis character when it doesn't fit.
+
+    Truncation counts characters, not bytes or grapheme clusters. Python
+    strings are sequences of Unicode code points, so this stays correct
+    for CJK text and most single-code-point emoji - none of them get cut
+    in half - without needing an extra dependency. Only a plain ellipsis
+    is appended and no markdown syntax is introduced, so the truncation
+    itself can never break formatting; names already under the limit are
+    returned untouched.
+    """
+    if len(name) <= max_length:
+        return name
+    return name[: max_length - 1].rstrip() + "…"
+
 
 def _format_date(ts: int) -> str:
     dt = datetime.fromtimestamp(ts, tz=timezone.utc)
@@ -32,7 +61,7 @@ def format_history_table(
         body_rows.append(
             (
                 _format_date(row.played_at),
-                row.opponent_name,
+                truncate_display_name(row.opponent_name),
                 str(row.wins),
                 str(row.losses),
                 _format_delta(delta),
@@ -84,7 +113,7 @@ def format_history_fields(
         won = row.wins > row.losses
         icon = "🏆" if won else "💀"
         delta = row.elo_delta
-        name = f"{icon} {_format_date(row.played_at)} · vs {row.opponent_name}"
+        name = f"{icon} {_format_date(row.played_at)} · vs {truncate_display_name(row.opponent_name)}"
         value = (
             f"**{row.wins} - {row.losses}**\n"
             f"{row.elo_init} → {row.elo_final} ({_format_delta(delta)})"

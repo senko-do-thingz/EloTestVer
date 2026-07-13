@@ -16,6 +16,7 @@ from openpyxl.utils import get_column_letter
 
 from db.elo_db import db_connection
 from db.match_history_db import (
+    compute_streak_labels,
     get_full_match_history_by_season_month,
     get_months_with_history,
     get_seasons_with_history,
@@ -59,23 +60,6 @@ def _format_delta(delta: int) -> str:
     return str(delta)
 
 
-def _compute_streak_labels(rows: list) -> list[int | None]:
-    """Mirror the streak grouping used by -history's rendered image: ``rows``
-    is most-recent-first, and consecutive rows with the same result (win or
-    loss) form a "streak". Only the first (most recent) row of each streak
-    group gets a number; the rest are left as None (blank)."""
-    labels: list[int | None] = [None] * len(rows)
-    i = 0
-    while i < len(rows):
-        result = rows[i].wins > rows[i].losses
-        j = i
-        while j < len(rows) and (rows[j].wins > rows[j].losses) == result:
-            j += 1
-        labels[i] = j - i
-        i = j
-    return labels
-
-
 def _write_month_table(sheet, row: int, month: int, rows: list) -> int:
     """Write one month's section starting at `row`. Returns the next free row."""
     last_col = len(COLUMN_HEADERS)
@@ -97,7 +81,7 @@ def _write_month_table(sheet, row: int, month: int, rows: list) -> int:
         cell.alignment = CENTER
     row += 1
 
-    streak_labels = _compute_streak_labels(rows)
+    streak_labels = compute_streak_labels(rows)
     total_games = 0
 
     # Data rows (most recent match first, matching /history's display order)

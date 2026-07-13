@@ -13,9 +13,32 @@ import os
 import discord
 from discord.ext import commands
 
-from db.elo_db import get_db_path, get_log_channel_id, get_nickname
+from db.elo_db import get_db_path, get_decay_log_channel_id, get_log_channel_id, get_nickname
 from utils.league import get_league_announce_channels
 from utils.logger import PRIVATE_GUILD_ID
+
+
+async def post_decay_log(bot: commands.Bot, guild_id: int, embed: discord.Embed) -> None:
+    """Post a decay change-log embed to the channel configured via
+    -decay_setup for this guild, if any. Shared by both the manual -decay
+    command (cogs/admin_elo/decay.py) and the automatic monthly task
+    (cogs/admin_elo/decay_auto.py) so both paths honor the same
+    per-guild setting instead of only the automatic task doing so."""
+    channel_id = get_decay_log_channel_id(guild_id)
+    if channel_id is None:
+        return
+
+    channel = bot.get_channel(channel_id)
+    if channel is None:
+        try:
+            channel = await bot.fetch_channel(channel_id)
+        except Exception:
+            return
+
+    try:
+        await channel.send(embed=embed)
+    except Exception:
+        pass
 
 
 def season_end_notice(season: int) -> str:

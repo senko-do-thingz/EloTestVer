@@ -2,6 +2,7 @@ import asyncio
 import functools
 import io
 import logging
+import math
 import os
 from typing import TYPE_CHECKING
 
@@ -74,6 +75,29 @@ def _text_needs_cjk(text: str) -> bool:
         ):
             return True
     return False
+
+
+# Titles built from a CJK/Hangul display name render noticeably wider per
+# character than Latin text (see `_load_lb_font`'s CJK fallback above), so a
+# name that would look fine in Latin script can still be long enough to run
+# into the "Year: ..." / "Season: ..." text drawn on the same row (see the
+# title rendering in `render_history_image`). Rather than measuring pixel
+# width there, names that contain CJK/Hangul characters are capped to a
+# fixed, conservative character count instead - simple, cheap, and immune to
+# per-glyph width differences across scripts.
+CJK_NAME_MAX_LENGTH = 10
+
+
+def truncate_cjk_name(name: str, max_length: int = CJK_NAME_MAX_LENGTH) -> str:
+    """Cap a display name to `max_length` characters, but only when it
+    contains Japanese/Korean/Chinese characters - Latin names are returned
+    unchanged. A plain "..." is appended when truncated, since it's drawn
+    with the same CJK-aware font as the rest of the title and won't render
+    as a missing-glyph box the way a single Unicode ellipsis character
+    sometimes does on fonts without that glyph."""
+    if not name or len(name) <= max_length or not _text_needs_cjk(name):
+        return name
+    return name[:max_length] + "..."
 
 
 def _cjk_font_paths(*, bold: bool) -> list[str]:
@@ -410,6 +434,7 @@ def render_history_image(
     avatar_bytes: bytes | None = None,
     season_month_text: str | None = None,
     year_text: str | None = None,
+    streak_labels: list[int | None] | None = None,
 ) -> io.BytesIO:
     """
     Render match history rows as a PNG "log" table, ClashPerk-style:
@@ -438,6 +463,17 @@ def render_history_image(
     bar, but only on the first row of each streak (i.e. the most recent
     match in that streak, or the row where the previous streak was cut
     off) - the remaining rows of the same streak are left blank.
+
+    ``streak_labels``, when given, must be pre-computed by the caller over
+    the player's FULL month of matches (e.g. via
+    db.match_history_db.compute_streak_labels) and already sliced down to
+    align 1:1 with ``rows``. Passing it in this way is required whenever
+    ``rows`` is only one page of a larger month - computing streaks from
+    just the visible page (the old behavior when this is omitted) makes a
+    streak that spans a page boundary look shorter than it really is on
+    each of the pages it touches, and disagrees with both the "Best Streak"
+    badge and the /export history sheet, which both already use the full
+    month's data.
     """
     row_height = 42 * SCALE
     pad_x = 20 * SCALE
@@ -561,15 +597,24 @@ def render_history_image(
     # rows are most-recent-first, so a streak's "first" row (top of the
     # group) is the most recent match in it, or the row where the previous
     # (opposite-result) streak was cut off. Only that row gets a number.
-    streak_labels: list[int | None] = [None] * len(rows)
-    i = 0
-    while i < len(rows):
-        result = rows[i][2] > rows[i][3]  # won
-        j = i
-        while j < len(rows) and (rows[j][2] > rows[j][3]) == result:
-            j += 1
-        streak_labels[i] = j - i
-        i = j
+    if streak_labels is not None:
+        # Caller already computed this over the full month and sliced it
+        # to match `rows` - see the docstring above for why that matters.
+        if len(streak_labels) != len(rows):
+            raise ValueError(
+                "streak_labels must have the same length as rows "
+                f"({len(streak_labels)} != {len(rows)})"
+            )
+    else:
+        streak_labels = [None] * len(rows)
+        i = 0
+        while i < len(rows):
+            result = rows[i][2] > rows[i][3]  # won
+            j = i
+            while j < len(rows) and (rows[j][2] > rows[j][3]) == result:
+                j += 1
+            streak_labels[i] = j - i
+            i = j
 
     # ── rows ────────────────────────────────────────────────────────────
     for idx, (date_str, opponent, wins, losses, delta, elo_init, elo_final) in enumerate(rows):
@@ -629,6 +674,7 @@ async def render_history_image_async(
     avatar_bytes: bytes | None = None,
     season_month_text: str | None = None,
     year_text: str | None = None,
+    streak_labels: list[int | None] | None = None,
 ) -> io.BytesIO:
     """Async wrapper around render_history_image (see render_leaderboard_image_async)."""
     return await asyncio.to_thread(
@@ -641,7 +687,611 @@ async def render_history_image_async(
         avatar_bytes=avatar_bytes,
         season_month_text=season_month_text,
         year_text=year_text,
+        streak_labels=streak_labels,
     )
+
+# ---------------------------------------------------------------------------
+# Elo graph image (ClashPerk-style trophy trend card)
+# ---------------------------------------------------------------------------
+
+_GRAPH_COMPARE = (114, 190, 246)  # light blue used for "vs previous month" deltas
+_GRAPH_AXIS_TEXT = _LB_TEXT_MUTED
+_GRAPH_GRID = _HIST_SEPARATOR
+_GRAPH_BOX_BG = _LB_ROW_HIGHLIGHT
+
+# (date_label, elo) - one point per CALENDAR DAY, oldest first, including
+# days the player didn't play. See utils.elo_graph.build_daily_series()
+# for how this is built.
+GraphSeriesPoint = tuple[str, int]
+
+# (x_fraction, elo) - one point per MATCH actually played, positioned on
+# a real calendar timeline (0..1 across the full axis span) rather than
+# evenly spaced by index. See utils.elo_graph.build_calendar_series().
+GraphCalendarPoint = tuple[float, int]
+
+# (x_fraction, "MM-DD") - one entry per CALENDAR DAY across the full
+# axis span, pre-generated up front (including days with no data yet)
+# purely to drive the x-axis tick labels. See
+# utils.elo_graph.build_calendar_series().
+GraphAxisTick = tuple[float, str]
+
+
+def _graph_ticks(axis_min: int, axis_max: int, axis_rows: int) -> list[float]:
+    """Return axis_rows + 1 evenly spaced gridline values from axis_min to
+    axis_max (inclusive), e.g. axis_rows=6 -> 7 gridlines, mirroring
+    ClashPerk's fixed trophy-range graph rather than auto-scaling to data."""
+    if axis_rows <= 0:
+        return [float(axis_min), float(axis_max)]
+    step = (axis_max - axis_min) / axis_rows
+    return [axis_min + step * i for i in range(axis_rows + 1)]
+
+
+# Rotation angle (degrees, counter-clockwise) for x-axis date labels,
+# matching ClashPerk's slanted "Jun 16 / Jun 18 / ..." tick labels.
+_GRAPH_AXIS_LABEL_ANGLE = 45.0
+
+
+def _graph_pick_label_indices(xs: list[int], min_gap_px: int) -> set[int]:
+    """Thin out x-axis date labels so they don't overlap: greedily keep a
+    point's label only if it is at least ``min_gap_px`` past the last kept
+    label's x-position, always keeping the first and last point labeled.
+
+    ``min_gap_px`` should already reflect the label's actual on-screen
+    horizontal footprint - for the slanted labels drawn by
+    ``_draw_slanted_axis_label`` that footprint is the label's projected
+    width (``text_width * cos(angle)``), not its full upright width, or
+    labels would be thinned out far more aggressively than necessary."""
+    if not xs:
+        return set()
+    if len(xs) == 1:
+        return {0}
+
+    selected = [0]
+    last_x = xs[0]
+    for i in range(1, len(xs) - 1):
+        if xs[i] - last_x >= min_gap_px:
+            selected.append(i)
+            last_x = xs[i]
+
+    last_idx = len(xs) - 1
+    if xs[last_idx] - last_x >= min_gap_px * 0.6:
+        selected.append(last_idx)
+    else:
+        selected[-1] = last_idx
+
+    return set(selected)
+
+
+def _draw_slanted_axis_label(
+    img: Image.Image,
+    draw: ImageDraw.ImageDraw,
+    tick_x: float,
+    top_y: float,
+    text: str,
+    font: ImageFont.ImageFont,
+    fill: tuple[int, int, int],
+    angle: float = _GRAPH_AXIS_LABEL_ANGLE,
+) -> None:
+    """Draw one x-axis date label rotated ClashPerk-style: slanted counter-
+    clockwise by ``angle`` degrees, anchored by its top-right corner at
+    (``tick_x``, ``top_y``) so the text hangs down-and-to-the-left of its
+    tick, exactly like ClashPerk's "Jun 16 / Jun 18 / ..." labels.
+
+    Pillow has no native angled-text draw call, so the label is rendered
+    upright onto its own small transparent layer first, rotated, then
+    alpha-composited onto ``img`` at the position that keeps the
+    top-right anchor fixed under the tick regardless of rotation.
+
+    This top-right anchoring (rather than the old center-then-clamp
+    approach) is what fixes labels overlapping at the chart edges: a
+    slanted label naturally grows down and to the left of its tick, so
+    neighbouring labels never need to be clamped back into each other's
+    space the way horizontal centered labels did.
+    """
+    bbox = draw.textbbox((0, 0), text, font=font)
+    text_w = bbox[2] - bbox[0]
+    text_h = bbox[3] - bbox[1]
+    pad = 4
+    layer_w = text_w + pad * 2
+    layer_h = text_h + pad * 2
+
+    layer = Image.new("RGBA", (layer_w, layer_h), (0, 0, 0, 0))
+    ImageDraw.Draw(layer).text(
+        (pad - bbox[0], pad - bbox[1]), text, fill=(*fill, 255), font=font
+    )
+    rotated = layer.rotate(angle, expand=True, resample=Image.BICUBIC)
+
+    # Where the un-rotated layer's top-right corner (our anchor) ends up
+    # once the layer is rotated about its own center.
+    dx = (layer_w - pad) - layer_w / 2
+    dy = pad - layer_h / 2
+    rad = math.radians(angle)
+    rx = dx * math.cos(rad) + dy * math.sin(rad)
+    ry = -dx * math.sin(rad) + dy * math.cos(rad)
+    anchor_x = rotated.width / 2 + rx
+    anchor_y = rotated.height / 2 + ry
+
+    paste_x = int(round(tick_x - anchor_x))
+    paste_y = int(round(top_y - anchor_y))
+    img.paste(rotated, (paste_x, paste_y), rotated)
+
+
+def _catmull_rom_segment(
+    p0: tuple[float, float],
+    p1: tuple[float, float],
+    p2: tuple[float, float],
+    p3: tuple[float, float],
+    samples: int,
+) -> list[tuple[float, float]]:
+    """Sample a uniform Catmull-Rom spline between p1 and p2, using p0/p3
+    as the neighboring control points that shape the curve's tangents.
+    Returns ``samples`` points spanning (0, 1] (p1 itself is NOT included,
+    so segments can be concatenated end-to-end without duplicate points).
+
+    x is evenly spaced across the chart in every caller here, so a
+    uniform (as opposed to centripetal) parametrization is smooth enough
+    and keeps the math simple.
+    """
+    points = []
+    for s in range(1, samples + 1):
+        t = s / samples
+        t2 = t * t
+        t3 = t2 * t
+        x = 0.5 * (
+            (2 * p1[0])
+            + (-p0[0] + p2[0]) * t
+            + (2 * p0[0] - 5 * p1[0] + 4 * p2[0] - p3[0]) * t2
+            + (-p0[0] + 3 * p1[0] - 3 * p2[0] + p3[0]) * t3
+        )
+        y = 0.5 * (
+            (2 * p1[1])
+            + (-p0[1] + p2[1]) * t
+            + (2 * p0[1] - 5 * p1[1] + 4 * p2[1] - p3[1]) * t2
+            + (-p0[1] + 3 * p1[1] - 3 * p2[1] + p3[1]) * t3
+        )
+        points.append((x, y))
+    return points
+
+
+def _draw_smooth_line(
+    draw: ImageDraw.ImageDraw,
+    points: list[tuple[float, float]],
+    *,
+    color_for_segment,
+    width: int,
+    samples_per_segment: int = 10,
+) -> None:
+    """Draw ``points`` as a smooth ClashPerk-style curve (Catmull-Rom
+    spline) instead of straight segments, one real segment [i, i+1] at a
+    time so ``color_for_segment(i)`` can still color each original
+    segment independently (e.g. green for a gain, red for a loss)."""
+    n = len(points)
+    if n < 2:
+        return
+    if n == 2:
+        # A straight 2-point spline has no curvature to speak of - just
+        # draw the line directly rather than spline-sampling it.
+        draw.line((*points[0], *points[1]), fill=color_for_segment(0), width=width)
+        return
+
+    for i in range(n - 1):
+        p0 = points[i - 1] if i > 0 else points[i]
+        p1 = points[i]
+        p2 = points[i + 1]
+        p3 = points[i + 2] if i + 2 < n else points[i + 1]
+        curve = [p1] + _catmull_rom_segment(p0, p1, p2, p3, samples_per_segment)
+        color = color_for_segment(i)
+        for j in range(len(curve) - 1):
+            draw.line((*curve[j], *curve[j + 1]), fill=color, width=width)
+
+
+def _draw_smooth_dashed_line(
+    draw: ImageDraw.ImageDraw,
+    points: list[tuple[float, float]],
+    *,
+    color,
+    width: int,
+    samples_per_segment: int = 10,
+    dash_on: int = 3,
+    dash_off: int = 2,
+) -> None:
+    """Draw ``points`` as a single-color smooth dashed curve (Catmull-Rom
+    spline), ClashPerk-style, used for the "vs previous month" comparison
+    line. Dashing is applied by skipping every other small chunk of
+    spline samples rather than true arc-length dashing - simple and looks
+    right at the sample density used here."""
+    n = len(points)
+    if n < 2:
+        return
+
+    # Flatten the whole series into one smooth polyline first, so the
+    # dash pattern is continuous across segment boundaries.
+    curve = [points[0]]
+    for i in range(n - 1):
+        p0 = points[i - 1] if i > 0 else points[i]
+        p1 = points[i]
+        p2 = points[i + 1]
+        p3 = points[i + 2] if i + 2 < n else points[i + 1]
+        curve.extend(_catmull_rom_segment(p0, p1, p2, p3, samples_per_segment))
+
+    period = dash_on + dash_off
+    for j in range(len(curve) - 1):
+        if (j % period) < dash_on:
+            draw.line((*curve[j], *curve[j + 1]), fill=color, width=width)
+
+
+def render_elo_graph_image(
+    series: list[GraphCalendarPoint],
+    *,
+    title: str,
+    width: int = 660,
+    avatar_bytes: bytes | None = None,
+    season_month_text: str | None = None,
+    year_text: str | None = None,
+    avg_win: int = 0,
+    avg_loss: int = 0,
+    avg_gain: int = 0,
+    final_elo: int | None = None,
+    prev_avg_win: int | None = None,
+    prev_avg_loss: int | None = None,
+    prev_avg_gain: int | None = None,
+    prev_final_elo: int | None = None,
+    prev_month_label: str | None = None,
+    compare_series: list[GraphSeriesPoint] | None = None,
+    axis_ticks: list[GraphAxisTick] | None = None,
+    axis_min: int = 300,
+    axis_max: int = 1000,
+    axis_rows: int = 7,
+) -> io.BytesIO:
+    """
+    Render a ClashPerk-style Elo trend card for one season/month: avatar +
+    player name as the title, four stat boxes (AVG. WIN / AVG. LOSS /
+    AVG. GAIN / FINAL ELO), and a smooth line chart of daily elo
+    underneath.
+
+    ``series`` is a list of (x_fraction, elo) points, oldest first - see
+    utils.elo_graph.build_calendar_series(). ``x_fraction`` positions the
+    point on a real calendar timeline (0..1 across the full axis span)
+    rather than evenly spaced by index, so same-day matches ("sets") sit
+    close together instead of on top of each other. It may include the
+    previous month's carry-over anchor point as its first entry (at
+    x_fraction=0.0); that point is drawn like any other, but the caller
+    must NOT have folded it into avg_win/avg_loss/avg_gain (see
+    utils.elo_graph.compute_month_averages). The line is rendered as a
+    smooth Catmull-Rom curve rather than sharp straight segments,
+    matching ClashPerk's trend graph.
+
+    ``axis_ticks`` is a list of (x_fraction, "MM-DD") entries on that
+    same 0..1 timeline, one per calendar day across the whole axis span
+    - see utils.elo_graph.build_calendar_series(). It is pre-generated
+    for every day regardless of whether ``series`` has a match that day,
+    so the x-axis lays out the full month ahead of time (including
+    future/unplayed days) instead of only labeling days with data. If
+    omitted, falls back to labeling ``series`` points directly.
+
+    If the ``prev_*`` values are given, a smaller comparison figure is
+    drawn next to each stat box showing the previous month's equivalent
+    value in a distinct color, ClashPerk-style; a stat with no previous
+    data simply omits the comparison.
+
+    ``compare_series``, if given, is a second (date_label, elo) series -
+    typically the previous month's own build_daily_series() output -
+    drawn as a smooth light-blue DASHED line with no dots, overlaid on the
+    same chart for a shape-to-shape "vs last month" comparison. It is
+    plotted across the full chart width independently of ``series`` (by
+    its own point count, not by matching calendar dates), so the two
+    lines may have different lengths.
+
+    The y-axis is fixed to ``axis_min``..``axis_max``, split evenly into
+    ``axis_rows`` rows (``axis_rows`` + 1 gridlines) rather than
+    auto-scaling to the data, matching ClashPerk's trophy graph. With the
+    defaults (300..1000, 7 rows) this gives clean 100-point gridlines:
+    300, 400, 500, 600, 700, 800, 900, 1000.
+    """
+    pad_x = 20 * SCALE
+    title_h = 34 * SCALE
+    season_h = 20 * SCALE if season_month_text else 0
+    stat_box_h = 64 * SCALE
+    stat_gap = 10 * SCALE
+    chart_top_pad = 8 * SCALE
+    chart_h = 220 * SCALE
+    x_label_h = 40 * SCALE
+    pad_bottom = 14 * SCALE
+    width_px = width * SCALE
+
+    height_px = (
+        title_h
+        + season_h
+        + stat_gap
+        + stat_box_h
+        + chart_top_pad
+        + chart_h
+        + x_label_h
+        + pad_bottom
+    )
+
+    img = _get_lb_template(width_px, height_px).copy()
+    draw = ImageDraw.Draw(img)
+
+    title_font = _load_lb_font(22 * SCALE, bold=True, for_text=title)
+    stat_label_font = _load_latin_font(12 * SCALE, bold=True)
+    stat_value_font = _load_latin_font(22 * SCALE, bold=True)
+    stat_compare_font = _load_latin_font(13 * SCALE, bold=True)
+    axis_font = _load_latin_font(13 * SCALE)
+
+    # ── title (avatar + name, season/month top-right) ───────────────────
+    title_x = pad_x
+    title_y = 8 * SCALE
+    avatar_size = 26 * SCALE
+    if avatar_bytes:
+        avatar_img = _circular_avatar(avatar_bytes, avatar_size)
+        if avatar_img is not None:
+            probe_bbox = draw.textbbox((0, title_y), title, font=title_font)
+            text_center_y = (probe_bbox[1] + probe_bbox[3]) / 2
+            avatar_y = int(text_center_y - avatar_size / 2)
+            img.paste(avatar_img, (pad_x, avatar_y), avatar_img)
+            title_x = pad_x + avatar_size + 8 * SCALE
+
+    draw.text((title_x, title_y), title, fill=_LB_TEXT, font=title_font)
+    if year_text:
+        year_font = _load_latin_font(22 * SCALE, bold=True)
+        year_w = draw.textlength(year_text, font=year_font)
+        draw.text((width_px - pad_x - year_w, title_y), year_text, fill=_LB_TEXT, font=year_font)
+    if season_month_text:
+        season_font = _load_latin_font(14 * SCALE, bold=True)
+        season_w = draw.textlength(season_month_text, font=season_font)
+        draw.text(
+            (width_px - pad_x - season_w, title_h + 4 * SCALE),
+            season_month_text,
+            fill=_LB_TEXT_MUTED,
+            font=season_font,
+        )
+
+    # ── stat boxes: AVG. WIN / AVG. LOSS / AVG. GAIN / FINAL ELO ────────
+    stat_top = title_h + season_h + stat_gap
+    box_gap = 8 * SCALE
+    box_w = (width_px - pad_x * 2 - box_gap * 3) // 4
+
+    def _fmt_signed(value: int) -> str:
+        return f"+{value}" if value >= 0 else str(value)
+
+    stats = [
+        ("AVG. WIN", _fmt_signed(avg_win), _HIST_WIN, prev_avg_win),
+        ("AVG. LOSS", _fmt_signed(avg_loss), _HIST_LOSS, prev_avg_loss),
+        (
+            "AVG. GAIN",
+            _fmt_signed(avg_gain),
+            _HIST_WIN if avg_gain >= 0 else _HIST_LOSS,
+            prev_avg_gain,
+        ),
+        (
+            "FINAL ELO",
+            str(final_elo) if final_elo is not None else "-",
+            _LB_TEXT,
+            prev_final_elo,
+        ),
+    ]
+
+    for idx, (label, value_text, value_color, prev_value) in enumerate(stats):
+        box_x0 = pad_x + idx * (box_w + box_gap)
+        box_x1 = box_x0 + box_w
+        draw.rounded_rectangle(
+            (box_x0, stat_top, box_x1, stat_top + stat_box_h),
+            radius=8 * SCALE,
+            fill=_GRAPH_BOX_BG,
+        )
+
+        inner_x = box_x0 + 10 * SCALE
+        draw.text(
+            (inner_x, stat_top + 8 * SCALE), label, fill=_LB_TEXT_MUTED, font=stat_label_font
+        )
+
+        value_y = stat_top + 24 * SCALE
+        draw.text((inner_x, value_y), value_text, fill=value_color, font=stat_value_font)
+
+        if prev_value is not None:
+            compare_text = _fmt_signed(prev_value) if label != "FINAL ELO" else str(prev_value)
+            if prev_month_label:
+                compare_text = f"{compare_text} ({prev_month_label})"
+            value_w = _lb_text_width(draw, value_text, stat_value_font)
+            compare_x = inner_x + value_w + 6 * SCALE
+            compare_max_w = box_x1 - 6 * SCALE - compare_x
+            if compare_max_w > 0:
+                display_compare = _lb_truncate_text(
+                    draw, compare_text, stat_compare_font, compare_max_w
+                )
+                draw.text(
+                    (compare_x, value_y + 5 * SCALE),
+                    display_compare,
+                    fill=_GRAPH_COMPARE,
+                    font=stat_compare_font,
+                )
+
+    # ── line chart ────────────────────────────────────────────────────
+    chart_top = stat_top + stat_box_h + chart_top_pad
+    chart_bottom = chart_top + chart_h
+    axis_label_w = 42 * SCALE
+    chart_x0 = pad_x + axis_label_w
+    chart_x1 = width_px - pad_x - axis_label_w
+
+    ticks = _graph_ticks(axis_min, axis_max, axis_rows)
+
+    def _y_for(elo: int) -> int:
+        clamped = min(max(elo, axis_min), axis_max)
+        ratio = (clamped - axis_min) / (axis_max - axis_min) if axis_max != axis_min else 0
+        return int(chart_bottom - ratio * chart_h)
+
+    def _x_for(fraction: float) -> float:
+        return chart_x0 + fraction * (chart_x1 - chart_x0)
+
+    # Figure out which axis_ticks (calendar days) actually get a visible
+    # label, ahead of drawing anything - these same x-positions are used
+    # for the vertical gridlines below, so the vertical lines always line
+    # up with the day labels instead of being independently spaced.
+    tick_xs: list[float] = []
+    label_indices: set[int] = set()
+    if axis_ticks:
+        tick_xs = [_x_for(frac) for frac, _ in axis_ticks]
+        max_label_w = max(
+            (_lb_text_width(draw, lbl, axis_font) for _, lbl in axis_ticks), default=0
+        )
+        # Slanted labels only take up ``width * cos(angle)`` of
+        # horizontal room instead of their full upright width, so
+        # thin them out based on that projected footprint - using
+        # the un-rotated width here (as the old code did) reserves
+        # far more gap than the slant actually needs and, combined
+        # with the old center-then-clamp positioning, is what caused
+        # edge labels to collide (e.g. "07-31" and "08-03" rendered
+        # on top of each other).
+        min_gap_px = max_label_w * math.cos(math.radians(_GRAPH_AXIS_LABEL_ANGLE)) + 10 * SCALE
+        label_indices = _graph_pick_label_indices(tick_xs, min_gap_px)
+
+    for tick in ticks:
+        ty = _y_for(tick)
+        draw.line((chart_x0, ty, chart_x1, ty), fill=_GRAPH_GRID, width=max(1, SCALE // 2))
+        tick_text = str(round(tick))
+        tick_w = _lb_text_width(draw, tick_text, axis_font)
+        draw.text(
+            (chart_x0 - 8 * SCALE - tick_w, ty - 7 * SCALE),
+            tick_text,
+            fill=_GRAPH_AXIS_TEXT,
+            font=axis_font,
+        )
+        draw.text(
+            (chart_x1 + 8 * SCALE, ty - 7 * SCALE),
+            tick_text,
+            fill=_GRAPH_AXIS_TEXT,
+            font=axis_font,
+        )
+
+    # Vertical gridlines, one per labeled day tick - mirrors the
+    # horizontal Elo gridlines above so the calendar axis is marked out
+    # the same way the Elo axis is, instead of leaving the chart body
+    # blank between the date labels at the bottom.
+    for idx in label_indices:
+        tx = tick_xs[idx]
+        draw.line(
+            (tx, chart_top, tx, chart_bottom), fill=_GRAPH_GRID, width=max(1, SCALE // 2)
+        )
+
+    def _xs_for(count: int) -> list[float]:
+        if count == 1:
+            return [chart_x0 + (chart_x1 - chart_x0) / 2]
+        step_x = (chart_x1 - chart_x0) / (count - 1)
+        return [chart_x0 + i * step_x for i in range(count)]
+
+    # ── "vs last month" dashed comparison line, drawn BEHIND the main
+    # line so the current month's trend stays visually on top ─────────
+    if compare_series:
+        compare_xs = _xs_for(len(compare_series))
+        compare_ys = [_y_for(elo) for _, elo in compare_series]
+        _draw_smooth_dashed_line(
+            draw,
+            list(zip(compare_xs, compare_ys)),
+            color=_GRAPH_COMPARE,
+            width=max(2, 2 * SCALE),
+        )
+
+    if series:
+        xs = [_x_for(frac) for frac, _ in series]
+        ys = [_y_for(elo) for _, elo in series]
+
+        def _segment_color(i: int) -> tuple[int, int, int]:
+            delta = series[i + 1][1] - series[i][1]
+            return _HIST_WIN if delta >= 0 else _HIST_LOSS
+
+        # ClashPerk-style smooth curve instead of sharp straight
+        # segments - no per-day dots, since a dot every single calendar
+        # day (including flat-filled non-played days) would clutter the
+        # chart rather than help read it.
+        _draw_smooth_line(
+            draw,
+            list(zip(xs, ys)),
+            color_for_segment=_segment_color,
+            width=max(3, 3 * SCALE),
+        )
+
+        # x-axis day labels come from axis_ticks (pre-generated for every
+        # calendar day of the month, whether or not it has a match yet -
+        # see utils.elo_graph.build_calendar_series()), not from the data
+        # points themselves, so unplayed days still get their own tick.
+        if axis_ticks:
+            label_top_y = chart_bottom + 6 * SCALE
+            for idx in sorted(label_indices):
+                label_text = axis_ticks[idx][1]
+                _draw_slanted_axis_label(
+                    img,
+                    draw,
+                    tick_xs[idx],
+                    label_top_y,
+                    label_text,
+                    axis_font,
+                    _GRAPH_AXIS_TEXT,
+                )
+    else:
+        no_data_text = "No matches recorded this month"
+        no_data_w = _lb_text_width(draw, no_data_text, axis_font)
+        draw.text(
+            ((width_px - no_data_w) // 2, (chart_top + chart_bottom) // 2),
+            no_data_text,
+            fill=_GRAPH_AXIS_TEXT,
+            font=axis_font,
+        )
+
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    buf.seek(0)
+    return buf
+
+
+async def render_elo_graph_image_async(
+    series: list[GraphCalendarPoint],
+    *,
+    title: str,
+    width: int = 660,
+    avatar_bytes: bytes | None = None,
+    season_month_text: str | None = None,
+    year_text: str | None = None,
+    avg_win: int = 0,
+    avg_loss: int = 0,
+    avg_gain: int = 0,
+    final_elo: int | None = None,
+    prev_avg_win: int | None = None,
+    prev_avg_loss: int | None = None,
+    prev_avg_gain: int | None = None,
+    prev_final_elo: int | None = None,
+    prev_month_label: str | None = None,
+    compare_series: list[GraphSeriesPoint] | None = None,
+    axis_ticks: list[GraphAxisTick] | None = None,
+    axis_min: int = 300,
+    axis_max: int = 1000,
+    axis_rows: int = 7,
+) -> io.BytesIO:
+    """Async wrapper around render_elo_graph_image (see render_leaderboard_image_async)."""
+    return await asyncio.to_thread(
+        render_elo_graph_image,
+        series,
+        title=title,
+        width=width,
+        avatar_bytes=avatar_bytes,
+        season_month_text=season_month_text,
+        year_text=year_text,
+        avg_win=avg_win,
+        avg_loss=avg_loss,
+        avg_gain=avg_gain,
+        final_elo=final_elo,
+        prev_avg_win=prev_avg_win,
+        prev_avg_loss=prev_avg_loss,
+        prev_avg_gain=prev_avg_gain,
+        prev_final_elo=prev_final_elo,
+        prev_month_label=prev_month_label,
+        compare_series=compare_series,
+        axis_ticks=axis_ticks,
+        axis_min=axis_min,
+        axis_max=axis_max,
+        axis_rows=axis_rows,
+    )
+
 
 # ---------------------------------------------------------------------------
 # Player comparison image (two-column "scoreboard" table)

@@ -1,6 +1,7 @@
 import asyncio
 import importlib
 import pkgutil
+import sys
 
 import discord
 from discord.ext import commands
@@ -9,6 +10,17 @@ import cogs as _cogs_pkg
 import cogs.private as _private_cogs_pkg
 from config import get_discord_token
 from utils.logger import bot_log
+
+# On Windows, asyncio.run() defaults to ProactorEventLoop, which opens a
+# loopback "self-pipe" socketpair on startup (see asyncio.windows_events).
+# Some firewalls/antivirus software (or a restricted user account) block a
+# process from binding that loopback socket, which raises
+# PermissionError: [WinError 10013] before the bot ever gets a chance to
+# connect to Discord. This bot doesn't use ProactorEventLoop-only features
+# (subprocess pipes, named pipes), so SelectorEventLoop is a safe
+# workaround that avoids creating that socket in the first place.
+if sys.platform == "win32":
+    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 
 intents = discord.Intents.default()
 intents.message_content = True
@@ -29,7 +41,7 @@ _USER_COMMANDS = {
 _ADMIN_COMMANDS = {
     "ad_rp",
     "revert",
-    "decay", "decay_setup", "reset_e",
+    "reset_e",
     "set_e", "set_eid",
     "set_w", "set_wid",
     "set_l", "set_lid",
@@ -42,6 +54,12 @@ _ADMIN_COMMANDS = {
     "set_lan",
     "log", "support",
 }
+# "decay" and "decay_setup" are intentionally NOT in _ADMIN_COMMANDS: both
+# already call bot_log() explicitly inside cogs/admin_elo/decay.py with more
+# accurate semantics than this generic on_command_completion watcher could
+# provide (e.g. -decay only logs once the reaction confirmation is actually
+# accepted, not merely when the command function returns after a cancel/
+# timeout). Watching them here as well produced duplicate log entries.
 # Always log: viewing another player's stats via ID-based commands
 _STATS_COMMANDS = {"st", "stats_id"}
 _WATCHED_COMMANDS = _USER_COMMANDS | _ADMIN_COMMANDS | _STATS_COMMANDS
