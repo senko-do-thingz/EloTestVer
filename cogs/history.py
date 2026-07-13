@@ -18,10 +18,12 @@ from discord.ext import commands
 from db.elo_db import db_connection, get_season_month
 from db.match_history_db import (
     compute_streak_labels,
+    count_player_match_history,
     count_player_match_history_by_season_month,
     get_full_match_history_by_season_month,
     get_match_history_by_season_month,
     get_months_with_history,
+    get_seasons_with_history,
 )
 from utils import (
     build_calendar_series,
@@ -53,13 +55,33 @@ def _previous_season_month(
     server's configured max_month, which may be unset or may not reflect
     what a given player actually played through).
 
+    Both branches below search for the player's most recent month that
+    actually HAS data, rather than blindly returning ``month - 1``: a
+    player can go a whole month without playing a single match (e.g.
+    inactive in month 2, then plays again in month 3), and in that case
+    "the previous month" for comparison purposes has to skip back past
+    the empty month to month 1, not silently point at empty month 2 -
+    which would make the graph's carry-over anchor and "vs last month"
+    stats disappear even though real prior data exists.
+
     Returns None if there is no earlier season/month with data - e.g. this
     is the player's very first month.
     """
-    if month > 1:
-        return season, month - 1
-    if season > 1:
-        prev_season = season - 1
+    earlier_months_this_season = [
+        m for m in get_months_with_history(cursor, player_id, season) if m < month
+    ]
+    if earlier_months_this_season:
+        return season, max(earlier_months_this_season)
+
+    # No earlier month with data in THIS season - walk back through every
+    # earlier season the player has any data in (not just season - 1),
+    # since a player can skip an entire season (e.g. inactive all of
+    # season 2, then plays again in season 3) and the previous-month
+    # lookup still needs to land on season 1's last month in that case.
+    for prev_season in sorted(
+        (s for s in get_seasons_with_history(cursor, player_id) if s < season),
+        reverse=True,
+    ):
         months = get_months_with_history(cursor, player_id, prev_season)
         if months:
             return prev_season, max(months)
@@ -105,7 +127,17 @@ class HistoryRefreshButton(discord.ui.Button):
 class HistoryGraphToggleButton(discord.ui.Button):
     """Switches HistoryView between the table view ("History") and the
     Elo line-chart view ("Graph"). The label flips to "Overview" while on
-    the graph so tapping it again returns to the original History table."""
+    the graph so tapping it again returns to the original History table.
+
+    Switching INTO graph mode requires the target player to have played
+    at least one set (ever, not just in the currently viewed season/month)
+    - otherwise there is nothing meaningful to plot. A player with zero
+    match_history rows at all gets a plain ephemeral message instead of
+    the graph card; this is separate from (and checked before) the
+    existing "no matches in this season/month" embed in _render_graph,
+    which still applies once a player has played somewhere but not in
+    the specific season/month currently being viewed.
+    """
 
     def __init__(self, custom_view: "HistoryView"):
         super().__init__(style=discord.ButtonStyle.primary, label="Graph")
@@ -113,6 +145,16 @@ class HistoryGraphToggleButton(discord.ui.Button):
 
     async def callback(self, interaction: discord.Interaction):
         view = self.custom_view
+        if view.mode == "history":
+            with db_connection(view.ctx.guild.id) as (_conn, cursor):
+                played_any_set = count_player_match_history(cursor, view.target.id) > 0
+            if not played_any_set:
+                await interaction.response.send_message(
+                    "You need to play at least 1 set to use this feature.",
+                    ephemeral=True,
+                )
+                return
+
         view.mode = "graph" if view.mode == "history" else "history"
         self.label = "Overview" if view.mode == "graph" else "Graph"
         await view.update_history(interaction)

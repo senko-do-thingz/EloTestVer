@@ -243,7 +243,7 @@ class HelpCog(commands.Cog):
         command_count = len(prefix_command_names | tree_command_names)
 
         embed = discord.Embed(
-            title="Elo Bot Information",
+            title="EloBot Information",
             description="> A Discord bot built for managing Elo-based PvZH competitions.",
             color=discord.Color.blue(),
         )
@@ -264,9 +264,9 @@ class HelpCog(commands.Cog):
         embed.add_field(
             name="\u200b",
             value=(
-                "Thank you for using Elo Bot! ❤️\n"
-                "If you encounter any issues or have suggestions, feel free to "
-                "contact <@674610469977194521>."
+                "Thank you for using EloBot! ❤️\n"
+                "If you encounter any issues or have suggestions, dm me and use "
+                "/msg to contact <@674610469977194521>."
             ),
             inline=False,
         )

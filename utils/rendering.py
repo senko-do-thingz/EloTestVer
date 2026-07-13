@@ -1040,8 +1040,8 @@ def render_elo_graph_image(
     x_fraction=0.0); that point is drawn like any other, but the caller
     must NOT have folded it into avg_win/avg_loss/avg_gain (see
     utils.elo_graph.compute_month_averages). The line is rendered as a
-    smooth Catmull-Rom curve rather than sharp straight segments,
-    matching ClashPerk's trend graph.
+    smooth monotone cubic Hermite curve rather than sharp straight
+    segments, matching ClashPerk's trend graph.
 
     ``axis_ticks`` is a list of (x_fraction, "MM-DD") entries on that
     same 0..1 timeline, one per calendar day across the whole axis span
@@ -1274,7 +1274,7 @@ def render_elo_graph_image(
 
     # ── anti-aliased curve layer ─────────────────────────────────────
     # ImageDraw.line() has no built-in anti-aliasing, so the smooth
-    # Catmull-Rom curve comes out with visibly jagged/aliased edges once
+    # monotone Hermite curve comes out with visibly jagged/aliased edges once
     # zoomed in (unlike ClashPerk's smooth vector line). To fix this
     # without touching the rest of the (already crisp) card, the curve(s)
     # are drawn on a separate transparent layer at LINE_SS times this
