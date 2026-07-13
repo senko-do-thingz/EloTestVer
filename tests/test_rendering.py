@@ -231,14 +231,14 @@ class TestRenderEloGraphImage:
         from utils.rendering import render_elo_graph_image
         buf = render_elo_graph_image(SAMPLE_GRAPH_SERIES, title="Test Graph")
         img = _open_buf(buf)
-        # Default width=660, SCALE=2 -> expected pixel width 1320
-        assert img.size[0] == 1320
+        # Default width=660, GSCALE=SCALE*2=4 -> expected pixel width 2640
+        assert img.size[0] == 2640
 
     def test_custom_width(self):
         from utils.rendering import render_elo_graph_image
         buf = render_elo_graph_image(SAMPLE_GRAPH_SERIES, title="Test Graph", width=500)
         img = _open_buf(buf)
-        assert img.size[0] == 1000
+        assert img.size[0] == 2000
 
     def test_empty_series_does_not_raise(self):
         from utils.rendering import render_elo_graph_image

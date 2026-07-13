@@ -816,73 +816,163 @@ def _draw_slanted_axis_label(
     img.paste(rotated, (paste_x, paste_y), rotated)
 
 
-def _catmull_rom_segment(
+def _monotone_cubic_tangents(xs: list[float], ys: list[float]) -> list[float]:
+    """Compute per-point tangent slopes for a monotone cubic Hermite
+    spline through (xs[i], ys[i]) using the Fritsch-Carlson method - the
+    same monotonicity-preserving algorithm scipy.interpolate.
+    PchipInterpolator uses internally.
+
+    Unlike the Catmull-Rom spline this replaces, a tangent here is never
+    allowed to point the curve past a data point: whenever the secant
+    slope changes sign (or flattens to zero) at a point - i.e. that
+    point is a local peak or valley - the tangent is pinned to exactly
+    0, so the curve arrives flat and turns around right there instead of
+    bulging past it. This is what "no overshoot" means in practice and
+    is the whole reason PCHIP/monotone splines are preferred over a
+    plain cubic/Catmull-Rom spline for this kind of chart.
+    """
+    n = len(xs)
+    if n < 2:
+        return [0.0] * n
+
+    # Secant (straight-line) slope across each original interval.
+    d = [
+        (ys[i + 1] - ys[i]) / (xs[i + 1] - xs[i]) if xs[i + 1] != xs[i] else 0.0
+        for i in range(n - 1)
+    ]
+
+    m = [0.0] * n
+    m[0] = d[0]
+    m[-1] = d[-1]
+    for i in range(1, n - 1):
+        if d[i - 1] == 0.0 or d[i] == 0.0 or (d[i - 1] > 0) != (d[i] > 0):
+            # Local peak or valley - flat tangent, no overshoot.
+            m[i] = 0.0
+        else:
+            # Fritsch-Carlson weighted harmonic mean of the two secants,
+            # biased toward the shorter of the two neighboring
+            # intervals so an interval's own local slope stays close to
+            # its own two endpoints rather than being pulled toward a
+            # much wider neighbor.
+            h0 = xs[i] - xs[i - 1]
+            h1 = xs[i + 1] - xs[i]
+            w0 = 2 * h1 + h0
+            w1 = h1 + 2 * h0
+            m[i] = (w0 + w1) / (w0 / d[i - 1] + w1 / d[i])
+    return m
+
+
+def _sample_monotone_curve(
+    points: list[tuple[float, float]], samples_per_segment: int
+) -> list[tuple[float, float]]:
+    """Interpolate ``points`` with a monotone cubic Hermite spline and
+    flatten the WHOLE series into a single continuous, densely sampled
+    polyline (as opposed to the old approach of spline-sampling one
+    original segment at a time). Returns the first point followed by
+    ``samples_per_segment`` extra points per original interval - a
+    single unbroken path with no per-segment seams, ready to be
+    re-colored internally (e.g. by LineCollection-style per-sub-segment
+    coloring) without ever being drawn as separate disconnected paths.
+    """
+    n = len(points)
+    if n < 3:
+        return list(points)
+
+    xs = [p[0] for p in points]
+    ys = [p[1] for p in points]
+    m = _monotone_cubic_tangents(xs, ys)
+
+    curve = [points[0]]
+    for i in range(n - 1):
+        x0, y0 = points[i]
+        x1, y1 = points[i + 1]
+        h = x1 - x0
+        m0, m1 = m[i], m[i + 1]
+        for s in range(1, samples_per_segment + 1):
+            t = s / samples_per_segment
+            t2 = t * t
+            t3 = t2 * t
+            # Cubic Hermite basis functions.
+            h00 = 2 * t3 - 3 * t2 + 1
+            h10 = t3 - 2 * t2 + t
+            h01 = -2 * t3 + 3 * t2
+            h11 = t3 - t2
+            x = x0 + h * t
+            y = h00 * y0 + h10 * h * m0 + h01 * y1 + h11 * h * m1
+            curve.append((x, y))
+    return curve
+
+
+def _draw_round_segment(
+    draw: ImageDraw.ImageDraw,
     p0: tuple[float, float],
     p1: tuple[float, float],
-    p2: tuple[float, float],
-    p3: tuple[float, float],
-    samples: int,
-) -> list[tuple[float, float]]:
-    """Sample a uniform Catmull-Rom spline between p1 and p2, using p0/p3
-    as the neighboring control points that shape the curve's tangents.
-    Returns ``samples`` points spanning (0, 1] (p1 itself is NOT included,
-    so segments can be concatenated end-to-end without duplicate points).
+    color: tuple[int, int, int],
+    width: int,
+) -> None:
+    """Draw one stroke from p0 to p1 with rounded joins/caps.
 
-    x is evenly spaced across the chart in every caller here, so a
-    uniform (as opposed to centripetal) parametrization is smooth enough
-    and keeps the math simple.
+    ImageDraw.line() only draws flat (butt) ends - back-to-back calls
+    left a visible wedge-shaped notch at every join wherever the line
+    changed angle or color, which is what produced the "disconnected
+    segments" look. Stamping a filled circle the width of the stroke at
+    both endpoints rounds those joins off, the same way a vector
+    renderer's round line-join/line-cap would, so many tiny consecutive
+    sub-segments still read as one smooth continuous tube instead of a
+    chain of mitred rectangles.
     """
-    points = []
-    for s in range(1, samples + 1):
-        t = s / samples
-        t2 = t * t
-        t3 = t2 * t
-        x = 0.5 * (
-            (2 * p1[0])
-            + (-p0[0] + p2[0]) * t
-            + (2 * p0[0] - 5 * p1[0] + 4 * p2[0] - p3[0]) * t2
-            + (-p0[0] + 3 * p1[0] - 3 * p2[0] + p3[0]) * t3
-        )
-        y = 0.5 * (
-            (2 * p1[1])
-            + (-p0[1] + p2[1]) * t
-            + (2 * p0[1] - 5 * p1[1] + 4 * p2[1] - p3[1]) * t2
-            + (-p0[1] + 3 * p1[1] - 3 * p2[1] + p3[1]) * t3
-        )
-        points.append((x, y))
-    return points
+    draw.line((*p0, *p1), fill=color, width=width)
+    r = width / 2
+    for cx, cy in (p0, p1):
+        draw.ellipse((cx - r, cy - r, cx + r, cy + r), fill=color)
 
 
 def _draw_smooth_line(
     draw: ImageDraw.ImageDraw,
     points: list[tuple[float, float]],
     *,
-    color_for_segment,
+    color_rising: tuple[int, int, int],
+    color_falling: tuple[int, int, int],
     width: int,
     samples_per_segment: int = 10,
 ) -> None:
-    """Draw ``points`` as a smooth ClashPerk-style curve (Catmull-Rom
-    spline) instead of straight segments, one real segment [i, i+1] at a
-    time so ``color_for_segment(i)`` can still color each original
-    segment independently (e.g. green for a gain, red for a loss)."""
+    """Draw ``points`` as ONE continuous ClashPerk-style curve using a
+    monotone cubic Hermite spline (see ``_monotone_cubic_tangents``),
+    colored per tiny sub-segment based on the interpolated curve's own
+    local direction rather than per original data segment.
+
+    This is the key fix for the color-transition gap: the previous
+    implementation picked a single color for an entire original segment
+    [i, i+1] based on the raw ``value[i+1] - value[i]`` delta, then
+    spline-sampled that segment on its own. Because the spline's actual
+    shape near a peak/valley is influenced by neighboring points, its
+    real turning point rarely lands exactly on data point i or i+1 -
+    so the hard color switch at the data vertex didn't line up with
+    where the drawn curve actually turned around, reading as a
+    visible kink/gap.
+
+    Here the whole series is interpolated into a single dense polyline
+    first (``_sample_monotone_curve``), and color is decided per tiny
+    rendered sub-segment by comparing consecutive interpolated points.
+    The color can therefore only flip where the rendered curve's own
+    slope crosses zero - i.e. exactly at its visual peak/valley - so
+    the transition always lines up with the curve's real turning point,
+    with no gap. Screen y grows downward, so a falling pixel-y means
+    the underlying value rose (mirrors the old ``delta >= 0`` rule).
+    """
     n = len(points)
     if n < 2:
         return
     if n == 2:
-        # A straight 2-point spline has no curvature to speak of - just
-        # draw the line directly rather than spline-sampling it.
-        draw.line((*points[0], *points[1]), fill=color_for_segment(0), width=width)
+        color = color_rising if points[1][1] <= points[0][1] else color_falling
+        _draw_round_segment(draw, points[0], points[1], color, width)
         return
 
-    for i in range(n - 1):
-        p0 = points[i - 1] if i > 0 else points[i]
-        p1 = points[i]
-        p2 = points[i + 1]
-        p3 = points[i + 2] if i + 2 < n else points[i + 1]
-        curve = [p1] + _catmull_rom_segment(p0, p1, p2, p3, samples_per_segment)
-        color = color_for_segment(i)
-        for j in range(len(curve) - 1):
-            draw.line((*curve[j], *curve[j + 1]), fill=color, width=width)
+    curve = _sample_monotone_curve(points, samples_per_segment)
+    for j in range(len(curve) - 1):
+        p0, p1 = curve[j], curve[j + 1]
+        color = color_rising if p1[1] <= p0[1] else color_falling
+        _draw_round_segment(draw, p0, p1, color, width)
 
 
 def _draw_smooth_dashed_line(
@@ -895,29 +985,21 @@ def _draw_smooth_dashed_line(
     dash_on: int = 3,
     dash_off: int = 2,
 ) -> None:
-    """Draw ``points`` as a single-color smooth dashed curve (Catmull-Rom
-    spline), ClashPerk-style, used for the "vs previous month" comparison
-    line. Dashing is applied by skipping every other small chunk of
-    spline samples rather than true arc-length dashing - simple and looks
-    right at the sample density used here."""
+    """Draw ``points`` as a single-color smooth dashed curve (monotone
+    cubic Hermite spline), ClashPerk-style, used for the "vs previous
+    month" comparison line. Dashing is applied by skipping every other
+    small chunk of spline samples rather than true arc-length dashing -
+    simple and looks right at the sample density used here."""
     n = len(points)
     if n < 2:
         return
 
-    # Flatten the whole series into one smooth polyline first, so the
-    # dash pattern is continuous across segment boundaries.
-    curve = [points[0]]
-    for i in range(n - 1):
-        p0 = points[i - 1] if i > 0 else points[i]
-        p1 = points[i]
-        p2 = points[i + 1]
-        p3 = points[i + 2] if i + 2 < n else points[i + 1]
-        curve.extend(_catmull_rom_segment(p0, p1, p2, p3, samples_per_segment))
+    curve = _sample_monotone_curve(points, samples_per_segment)
 
     period = dash_on + dash_off
     for j in range(len(curve) - 1):
         if (j % period) < dash_on:
-            draw.line((*curve[j], *curve[j + 1]), fill=color, width=width)
+            _draw_round_segment(draw, curve[j], curve[j + 1], color, width)
 
 
 def render_elo_graph_image(
@@ -988,16 +1070,26 @@ def render_elo_graph_image(
     defaults (300..1000, 7 rows) this gives clean 100-point gridlines:
     300, 400, 500, 600, 700, 800, 900, 1000.
     """
-    pad_x = 20 * SCALE
-    title_h = 34 * SCALE
-    season_h = 20 * SCALE if season_month_text else 0
-    stat_box_h = 64 * SCALE
-    stat_gap = 10 * SCALE
-    chart_top_pad = 8 * SCALE
-    chart_h = 220 * SCALE
-    x_label_h = 40 * SCALE
-    pad_bottom = 14 * SCALE
-    width_px = width * SCALE
+    # Rendered at double the usual SCALE used by other cards (leaderboard,
+    # history table, ...). The earlier anti-aliased curve layer fixed the
+    # jagged line *edges*, but the card's overall pixel resolution was
+    # still the limiting factor once a person pinch-zooms in on Discord:
+    # zooming past an image's native resolution always softens it, no
+    # matter how clean the edges were drawn. Doubling the resolution here
+    # (only for this card) gives real extra pixel detail to zoom into,
+    # closer to how crisp ClashPerk's own graph stays under zoom.
+    GSCALE = SCALE * 2
+
+    pad_x = 20 * GSCALE
+    title_h = 34 * GSCALE
+    season_h = 20 * GSCALE if season_month_text else 0
+    stat_box_h = 64 * GSCALE
+    stat_gap = 10 * GSCALE
+    chart_top_pad = 8 * GSCALE
+    chart_h = 220 * GSCALE
+    x_label_h = 40 * GSCALE
+    pad_bottom = 14 * GSCALE
+    width_px = width * GSCALE
 
     height_px = (
         title_h
@@ -1013,16 +1105,16 @@ def render_elo_graph_image(
     img = _get_lb_template(width_px, height_px).copy()
     draw = ImageDraw.Draw(img)
 
-    title_font = _load_lb_font(22 * SCALE, bold=True, for_text=title)
-    stat_label_font = _load_latin_font(12 * SCALE, bold=True)
-    stat_value_font = _load_latin_font(22 * SCALE, bold=True)
-    stat_compare_font = _load_latin_font(13 * SCALE, bold=True)
-    axis_font = _load_latin_font(13 * SCALE)
+    title_font = _load_lb_font(22 * GSCALE, bold=True, for_text=title)
+    stat_label_font = _load_latin_font(12 * GSCALE, bold=True)
+    stat_value_font = _load_latin_font(22 * GSCALE, bold=True)
+    stat_compare_font = _load_latin_font(13 * GSCALE, bold=True)
+    axis_font = _load_latin_font(13 * GSCALE)
 
     # ── title (avatar + name, season/month top-right) ───────────────────
     title_x = pad_x
-    title_y = 8 * SCALE
-    avatar_size = 26 * SCALE
+    title_y = 8 * GSCALE
+    avatar_size = 26 * GSCALE
     if avatar_bytes:
         avatar_img = _circular_avatar(avatar_bytes, avatar_size)
         if avatar_img is not None:
@@ -1030,18 +1122,18 @@ def render_elo_graph_image(
             text_center_y = (probe_bbox[1] + probe_bbox[3]) / 2
             avatar_y = int(text_center_y - avatar_size / 2)
             img.paste(avatar_img, (pad_x, avatar_y), avatar_img)
-            title_x = pad_x + avatar_size + 8 * SCALE
+            title_x = pad_x + avatar_size + 8 * GSCALE
 
     draw.text((title_x, title_y), title, fill=_LB_TEXT, font=title_font)
     if year_text:
-        year_font = _load_latin_font(22 * SCALE, bold=True)
+        year_font = _load_latin_font(22 * GSCALE, bold=True)
         year_w = draw.textlength(year_text, font=year_font)
         draw.text((width_px - pad_x - year_w, title_y), year_text, fill=_LB_TEXT, font=year_font)
     if season_month_text:
-        season_font = _load_latin_font(14 * SCALE, bold=True)
+        season_font = _load_latin_font(14 * GSCALE, bold=True)
         season_w = draw.textlength(season_month_text, font=season_font)
         draw.text(
-            (width_px - pad_x - season_w, title_h + 4 * SCALE),
+            (width_px - pad_x - season_w, title_h + 4 * GSCALE),
             season_month_text,
             fill=_LB_TEXT_MUTED,
             font=season_font,
@@ -1049,7 +1141,7 @@ def render_elo_graph_image(
 
     # ── stat boxes: AVG. WIN / AVG. LOSS / AVG. GAIN / FINAL ELO ────────
     stat_top = title_h + season_h + stat_gap
-    box_gap = 8 * SCALE
+    box_gap = 8 * GSCALE
     box_w = (width_px - pad_x * 2 - box_gap * 3) // 4
 
     def _fmt_signed(value: int) -> str:
@@ -1077,16 +1169,16 @@ def render_elo_graph_image(
         box_x1 = box_x0 + box_w
         draw.rounded_rectangle(
             (box_x0, stat_top, box_x1, stat_top + stat_box_h),
-            radius=8 * SCALE,
+            radius=8 * GSCALE,
             fill=_GRAPH_BOX_BG,
         )
 
-        inner_x = box_x0 + 10 * SCALE
+        inner_x = box_x0 + 10 * GSCALE
         draw.text(
-            (inner_x, stat_top + 8 * SCALE), label, fill=_LB_TEXT_MUTED, font=stat_label_font
+            (inner_x, stat_top + 8 * GSCALE), label, fill=_LB_TEXT_MUTED, font=stat_label_font
         )
 
-        value_y = stat_top + 24 * SCALE
+        value_y = stat_top + 24 * GSCALE
         draw.text((inner_x, value_y), value_text, fill=value_color, font=stat_value_font)
 
         if prev_value is not None:
@@ -1094,14 +1186,14 @@ def render_elo_graph_image(
             if prev_month_label:
                 compare_text = f"{compare_text} ({prev_month_label})"
             value_w = _lb_text_width(draw, value_text, stat_value_font)
-            compare_x = inner_x + value_w + 6 * SCALE
-            compare_max_w = box_x1 - 6 * SCALE - compare_x
+            compare_x = inner_x + value_w + 6 * GSCALE
+            compare_max_w = box_x1 - 6 * GSCALE - compare_x
             if compare_max_w > 0:
                 display_compare = _lb_truncate_text(
                     draw, compare_text, stat_compare_font, compare_max_w
                 )
                 draw.text(
-                    (compare_x, value_y + 5 * SCALE),
+                    (compare_x, value_y + 5 * GSCALE),
                     display_compare,
                     fill=_GRAPH_COMPARE,
                     font=stat_compare_font,
@@ -1110,7 +1202,7 @@ def render_elo_graph_image(
     # ── line chart ────────────────────────────────────────────────────
     chart_top = stat_top + stat_box_h + chart_top_pad
     chart_bottom = chart_top + chart_h
-    axis_label_w = 42 * SCALE
+    axis_label_w = 42 * GSCALE
     chart_x0 = pad_x + axis_label_w
     chart_x1 = width_px - pad_x - axis_label_w
 
@@ -1143,22 +1235,22 @@ def render_elo_graph_image(
         # with the old center-then-clamp positioning, is what caused
         # edge labels to collide (e.g. "07-31" and "08-03" rendered
         # on top of each other).
-        min_gap_px = max_label_w * math.cos(math.radians(_GRAPH_AXIS_LABEL_ANGLE)) + 10 * SCALE
+        min_gap_px = max_label_w * math.cos(math.radians(_GRAPH_AXIS_LABEL_ANGLE)) + 10 * GSCALE
         label_indices = _graph_pick_label_indices(tick_xs, min_gap_px)
 
     for tick in ticks:
         ty = _y_for(tick)
-        draw.line((chart_x0, ty, chart_x1, ty), fill=_GRAPH_GRID, width=max(1, SCALE // 2))
+        draw.line((chart_x0, ty, chart_x1, ty), fill=_GRAPH_GRID, width=max(1, GSCALE // 2))
         tick_text = str(round(tick))
         tick_w = _lb_text_width(draw, tick_text, axis_font)
         draw.text(
-            (chart_x0 - 8 * SCALE - tick_w, ty - 7 * SCALE),
+            (chart_x0 - 8 * GSCALE - tick_w, ty - 7 * GSCALE),
             tick_text,
             fill=_GRAPH_AXIS_TEXT,
             font=axis_font,
         )
         draw.text(
-            (chart_x1 + 8 * SCALE, ty - 7 * SCALE),
+            (chart_x1 + 8 * GSCALE, ty - 7 * GSCALE),
             tick_text,
             fill=_GRAPH_AXIS_TEXT,
             font=axis_font,
@@ -1171,7 +1263,7 @@ def render_elo_graph_image(
     for idx in label_indices:
         tx = tick_xs[idx]
         draw.line(
-            (tx, chart_top, tx, chart_bottom), fill=_GRAPH_GRID, width=max(1, SCALE // 2)
+            (tx, chart_top, tx, chart_bottom), fill=_GRAPH_GRID, width=max(1, GSCALE // 2)
         )
 
     def _xs_for(count: int) -> list[float]:
@@ -1180,43 +1272,76 @@ def render_elo_graph_image(
         step_x = (chart_x1 - chart_x0) / (count - 1)
         return [chart_x0 + i * step_x for i in range(count)]
 
+    # ── anti-aliased curve layer ─────────────────────────────────────
+    # ImageDraw.line() has no built-in anti-aliasing, so the smooth
+    # Catmull-Rom curve comes out with visibly jagged/aliased edges once
+    # zoomed in (unlike ClashPerk's smooth vector line). To fix this
+    # without touching the rest of the (already crisp) card, the curve(s)
+    # are drawn on a separate transparent layer at LINE_SS times this
+    # image's resolution, then downsampled back down with LANCZOS -
+    # LANCZOS averages multiple supersampled pixels into each final
+    # pixel, which is what produces smooth anti-aliased edges - and
+    # composited onto the main image using its own alpha as the paste
+    # mask.
+    # LINE_SS is layered ON TOP of the doubled GSCALE resolution above,
+    # so it's halved from before (4 -> 2) to keep total supersampling
+    # work about the same as before this resolution bump, while still
+    # giving LANCZOS enough samples per final pixel for clean edges.
+    LINE_SS = 2
+    line_layer = Image.new("RGBA", (width_px * LINE_SS, height_px * LINE_SS), (0, 0, 0, 0))
+    line_draw = ImageDraw.Draw(line_layer)
+
+    def _ss_pts(pts: list[tuple[float, float]]) -> list[tuple[float, float]]:
+        return [(x * LINE_SS, y * LINE_SS) for x, y in pts]
+
     # ── "vs last month" dashed comparison line, drawn BEHIND the main
     # line so the current month's trend stays visually on top ─────────
     if compare_series:
         compare_xs = _xs_for(len(compare_series))
         compare_ys = [_y_for(elo) for _, elo in compare_series]
         _draw_smooth_dashed_line(
-            draw,
-            list(zip(compare_xs, compare_ys)),
+            line_draw,
+            _ss_pts(list(zip(compare_xs, compare_ys))),
             color=_GRAPH_COMPARE,
-            width=max(2, 2 * SCALE),
+            width=max(2, 2 * GSCALE) * LINE_SS,
         )
 
     if series:
         xs = [_x_for(frac) for frac, _ in series]
         ys = [_y_for(elo) for _, elo in series]
 
-        def _segment_color(i: int) -> tuple[int, int, int]:
-            delta = series[i + 1][1] - series[i][1]
-            return _HIST_WIN if delta >= 0 else _HIST_LOSS
-
         # ClashPerk-style smooth curve instead of sharp straight
         # segments - no per-day dots, since a dot every single calendar
         # day (including flat-filled non-played days) would clutter the
-        # chart rather than help read it.
+        # chart rather than help read it. Color is decided per tiny
+        # interpolated sub-segment inside _draw_smooth_line itself (see
+        # its docstring), not per original data segment, so the
+        # rise/fall transition always lands exactly on the curve's own
+        # peak/valley instead of on an unrelated data vertex.
         _draw_smooth_line(
-            draw,
-            list(zip(xs, ys)),
-            color_for_segment=_segment_color,
-            width=max(3, 3 * SCALE),
+            line_draw,
+            _ss_pts(list(zip(xs, ys))),
+            color_rising=_HIST_WIN,
+            color_falling=_HIST_LOSS,
+            width=max(3, 3 * GSCALE) * LINE_SS,
         )
 
+    # Downsample the supersampled curve layer (main line and/or "vs last
+    # month" dashed line) and composite it onto the main image now,
+    # before the x-axis day labels are drawn below, so the labels stay
+    # crisp on top rather than being dragged through the resize. Safe to
+    # do unconditionally even with nothing drawn on line_layer - pasting
+    # a fully transparent layer is a no-op.
+    line_layer = line_layer.resize((width_px, height_px), Image.LANCZOS)
+    img.paste(line_layer, (0, 0), line_layer)
+
+    if series:
         # x-axis day labels come from axis_ticks (pre-generated for every
         # calendar day of the month, whether or not it has a match yet -
         # see utils.elo_graph.build_calendar_series()), not from the data
         # points themselves, so unplayed days still get their own tick.
         if axis_ticks:
-            label_top_y = chart_bottom + 6 * SCALE
+            label_top_y = chart_bottom + 6 * GSCALE
             for idx in sorted(label_indices):
                 label_text = axis_ticks[idx][1]
                 _draw_slanted_axis_label(
