@@ -396,3 +396,16 @@ class TestRestGapFractions:
         assert rest_gap_fractions(
             [(date(2026, 7, 5), date(2026, 7, 9))], axis_start=date(2026, 7, 5), total_days=0
         ) == []
+
+    def test_gap_before_axis_start_is_clamped_to_zero(self):
+        # The anchor's TRUE calendar day can fall before axis_start (see
+        # build_calendar_series()'s own note that the anchor POINT is
+        # always pinned to x_fraction 0.0 regardless of its real day).
+        # A gap opened by that anchor must clamp its start to 0.0 too,
+        # so the band stays aligned with where the line actually starts
+        # instead of drifting off the left edge of the chart.
+        axis_start = date(2026, 6, 30)
+        gaps = [(date(2026, 6, 20), date(2026, 7, 8))]
+        fractions = rest_gap_fractions(gaps, axis_start=axis_start, total_days=32)
+        assert fractions[0][0] == 0.0
+        assert fractions[0][1] == pytest.approx((date(2026, 7, 8) - axis_start).days / 32)

@@ -9,7 +9,7 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 
 import discord
 from discord import app_commands
@@ -64,6 +64,37 @@ def _compute_axis_bounds(elo_values: list[int]) -> tuple[int, int]:
     if hi > axis_max:
         axis_max = -(-hi // 50) * 50  # ceil to nearest 50
     return int(axis_min), int(axis_max)
+
+
+def _compute_rest_gaps_for_graph(
+    rows_chronological: list,
+    *,
+    anchor_date: date | None = None,
+) -> list[tuple[float, float]]:
+    """Build the ``rest_gaps`` list passed to render_elo_graph_image_async()
+    for the -graph card, pulled out of HistoryCog's graph-rendering path so
+    it can be unit-tested without mocking Discord interactions/context.
+
+    ``anchor_date`` must be the REAL previous-month carry-over date (the
+    module-level ``anchor_date`` variable in the caller, i.e. None unless
+    there actually is a previous month with recorded matches) - NOT the
+    synthetic "before first match" anchor used for ``series_anchor_date``
+    when there is no real previous month. Passing the synthetic anchor
+    here would make find_rest_gaps() fabricate a rest period ending at a
+    day that was never actually played (see find_rest_gaps()'s own
+    docstring for why that distinction matters).
+
+    Returns an empty list when there's no calendar axis to position a
+    gap against (calendar_axis_bounds() returns None), same as when
+    there simply aren't any qualifying gaps.
+    """
+    axis_bounds = calendar_axis_bounds(rows_chronological, anchor_date=anchor_date)
+    if axis_bounds is None:
+        return []
+    axis_start, axis_end = axis_bounds
+    total_days = (axis_end - axis_start).days + 1
+    gaps = find_rest_gaps(rows_chronological, anchor_date=anchor_date)
+    return rest_gap_fractions(gaps, axis_start=axis_start, total_days=total_days)
 
 
 def _previous_season_month(
@@ -509,16 +540,10 @@ class HistoryView(discord.ui.LayoutView):
         # REAL previous-month carry-over date (``anchor_date``), not
         # ``series_anchor_date``, since a synthetic "before first match"
         # anchor is not an actual day of activity and must not be
-        # treated as one here (see find_rest_gaps()'s docstring).
-        rest_gaps: list[tuple[float, float]] = []
-        axis_bounds = calendar_axis_bounds(rows_chronological, anchor_date=anchor_date)
-        if axis_bounds is not None:
-            axis_start, axis_end = axis_bounds
-            total_days = (axis_end - axis_start).days + 1
-            gaps = find_rest_gaps(rows_chronological, anchor_date=anchor_date)
-            rest_gaps = rest_gap_fractions(
-                gaps, axis_start=axis_start, total_days=total_days
-            )
+        # treated as one here - see _compute_rest_gaps_for_graph().
+        rest_gaps = _compute_rest_gaps_for_graph(
+            rows_chronological, anchor_date=anchor_date
+        )
 
         # The y-axis defaults to 300-1000, but must never clamp a real elo
         # value that falls outside that range (see Q1): extend the axis to

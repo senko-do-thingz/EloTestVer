@@ -397,12 +397,27 @@ def rest_gap_fractions(
     reference point, so a shaded gap band lines up exactly with the day
     gridlines/labels it spans.
 
+    Both fractions are clamped to the visible ``0.0..1.0`` axis range.
+    This matters specifically for a gap opened by the previous-month
+    carry-over anchor (see find_rest_gaps()'s ``anchor_date`` param):
+    that anchor's TRUE calendar day can fall well before ``axis_start``
+    (e.g. the last match of the previous month was on the 20th, but
+    ``axis_start`` is always that month's last day), yet
+    build_calendar_series() always pins the anchor's drawn POINT to
+    x_fraction 0.0 regardless of its true day - so a gap band starting
+    at the anchor's unclamped (negative) fraction would visibly drift
+    off the left edge of the chart, out of sync with where the line
+    itself actually starts. Clamping to 0.0 keeps the band's start
+    aligned with the anchor point's drawn position instead.
+
     Returns an empty list if ``total_days`` is not positive (nothing to
     position a fraction against).
     """
     if total_days <= 0:
         return []
-    return [
-        ((start - axis_start).days / total_days, (end - axis_start).days / total_days)
-        for start, end in rest_gaps
-    ]
+    fractions: list[tuple[float, float]] = []
+    for start, end in rest_gaps:
+        start_frac = max(0.0, min(1.0, (start - axis_start).days / total_days))
+        end_frac = max(0.0, min(1.0, (end - axis_start).days / total_days))
+        fractions.append((start_frac, end_frac))
+    return fractions
