@@ -205,6 +205,13 @@ class HistoryGraphToggleButton(discord.ui.Button):
 
         view.mode = "graph" if view.mode == "history" else "history"
         self.label = "Overview" if view.mode == "graph" else "Graph"
+        if view.mode == "history":
+            # Always land back on page 0 rather than wherever the table was
+            # left before switching to the graph - the graph view doesn't
+            # expose or track a page position, so silently resuming an old
+            # one would be confusing rather than a deliberate "remember my
+            # place" feature.
+            view.page = 0
         await view.update_history(interaction)
 
 
@@ -602,8 +609,17 @@ class HistoryCog(commands.Cog):
         the user to reply with the month number they want (mirrors the
         -register "reply to this message" flow). Returns (prompt_message,
         chosen_month), or None if the flow was cancelled/timed out (the
-        prompt message is already updated to reflect that in that case)."""
+        prompt message is already updated to reflect that in that case).
+
+        A reply that isn't a valid integer, or isn't one of the offered
+        `months`, re-prompts on the SAME message (fresh MONTH_REPLY_TIMEOUT
+        window each time) instead of ending the flow - cheaper for the user
+        than re-running the whole /history command for a typo. `months` is
+        expected to already be exactly the set of months this player has
+        data in for `season` (get_months_with_history), so there is no
+        "valid month with no data" case to special-case here."""
         months_list = ", ".join(str(m) for m in months)
+        months_set = set(months)
         prompt = await ctx.send(
             embed=discord.Embed(
                 title="Select Month",
@@ -623,30 +639,38 @@ class HistoryCog(commands.Cog):
                 and m.reference.message_id == prompt.id
             )
 
-        try:
-            reply: discord.Message = await self.bot.wait_for(
-                "message", timeout=MONTH_REPLY_TIMEOUT, check=check
-            )
-        except asyncio.TimeoutError:
-            await prompt.edit(embed=discord.Embed(
-                title="Timeout",
-                description="Timed out. Please try again.",
-                color=discord.Color.red(),
-            ))
-            return None
+        while True:
+            try:
+                reply: discord.Message = await self.bot.wait_for(
+                    "message", timeout=MONTH_REPLY_TIMEOUT, check=check
+                )
+            except asyncio.TimeoutError:
+                await prompt.edit(embed=discord.Embed(
+                    title="Timeout",
+                    description="Timed out. Please try again.",
+                    color=discord.Color.red(),
+                ))
+                return None
 
-        month_text = (reply.content or "").strip()
-        try:
-            chosen_month = int(month_text)
-        except ValueError:
-            await prompt.edit(embed=discord.Embed(
-                title="Invalid Month",
-                description="No valid month number provided. Please try again.",
-                color=discord.Color.red(),
-            ))
-            return None
+            month_text = (reply.content or "").strip()
+            try:
+                chosen_month = int(month_text)
+            except ValueError:
+                chosen_month = None
 
-        return prompt, chosen_month
+            if chosen_month is None or chosen_month not in months_set:
+                await prompt.edit(embed=discord.Embed(
+                    title="Invalid Month",
+                    description=(
+                        f"'{month_text}' isn't one of the months with data: "
+                        f"{months_list}.\nPlease reply to this message with a "
+                        "valid month number."
+                    ),
+                    color=discord.Color.red(),
+                ))
+                continue
+
+            return prompt, chosen_month
 
     async def _history_impl(
         self,

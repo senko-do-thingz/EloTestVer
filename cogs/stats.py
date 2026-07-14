@@ -635,8 +635,14 @@ class StatsCog(commands.GroupCog, name="stats", description="View player statist
         max_month = get_max_month(guild_id)
 
         # Resolve every group into either a single "Overall" directory, or
-        # one directory per requested month.
-        resolved_entries: list[tuple[str, list[str], bool]] = []
+        # one directory per requested month. `season` and `months` (the
+        # latter None for Overall entries) are carried alongside the
+        # display label so the multi-entry suffix below can be rebuilt
+        # de-duplicated per season instead of re-joining the raw per-token
+        # labels verbatim.
+        resolved_entries: list[
+            tuple[str, list[str], bool, int, list[int] | None]
+        ] = []
         for season, months in groups:
             season_dir = _resolve_season_dir(base, season)
             if season_dir is None:
@@ -673,7 +679,9 @@ class StatsCog(commands.GroupCog, name="stats", description="View player statist
                         )
                     )
                     return
-                resolved_entries.append((f"S{season}Overall", [overall_dir], True))
+                resolved_entries.append(
+                    (f"S{season}Overall", [overall_dir], True, season, None)
+                )
                 continue
 
             month_dirs = []
@@ -694,13 +702,13 @@ class StatsCog(commands.GroupCog, name="stats", description="View player statist
                 month_dirs.append(month_dir)
 
             label = f"S{season}" + "".join(f"M{m}" for m in months)
-            resolved_entries.append((label, month_dirs, False))
+            resolved_entries.append((label, month_dirs, False, season, months))
 
         # A single season resolving to exactly one directory - either one
         # exact month, or the season collapsing to Overall - shows the full
         # stats for that month/Overall instead of an averaged summary.
         if len(resolved_entries) == 1 and len(resolved_entries[0][1]) == 1:
-            label, dirs, is_overall = resolved_entries[0]
+            label, dirs, is_overall, _, _ = resolved_entries[0]
             dir_path = dirs[0]
 
             elo = _read_player_stat(dir_path, "data.txt", player_name_lower)
@@ -791,7 +799,7 @@ class StatsCog(commands.GroupCog, name="stats", description="View player statist
         # double-counting that month's wins/losses and skewing the Elo
         # average toward it.
         all_dirs = list(
-            dict.fromkeys(d for _, dirs, _ in resolved_entries for d in dirs)
+            dict.fromkeys(d for _, dirs, _, _, _ in resolved_entries for d in dirs)
         )
 
         elo_values: list[float] = []
@@ -850,7 +858,33 @@ class StatsCog(commands.GroupCog, name="stats", description="View player statist
         total_games = wins_total + losses_total
         win_rate_total = (wins_total / total_games * 100) if total_games > 0 else None
 
-        suffix = " + ".join(label for label, _, _ in resolved_entries)
+        # Build the display suffix with months de-duplicated per season, so
+        # it matches the de-duplicated directories actually counted above.
+        # Overlapping tokens like "s1m1m2 s1m2m3" would otherwise show
+        # "S1M1M2 + S1M2M3" (Month 2 listed twice), which reads as if it
+        # were double-counted even though the totals above only count it
+        # once. Overall entries are kept as separate segments (never merged
+        # with a month entry for the same season) since they're read from a
+        # distinct directory.
+        combined_labels: dict[tuple, list[int] | None] = {}
+        for label, _dirs, is_overall, season, months in resolved_entries:
+            if is_overall:
+                combined_labels[("overall", season, label)] = None
+            else:
+                key = ("months", season)
+                combined_labels.setdefault(key, []).extend(months)
+
+        suffix_parts: list[str] = []
+        for key, months in combined_labels.items():
+            if months is None:
+                suffix_parts.append(key[2])
+            else:
+                season = key[1]
+                deduped_months = list(dict.fromkeys(months))
+                suffix_parts.append(
+                    f"S{season}" + "".join(f"M{m}" for m in deduped_months)
+                )
+        suffix = " + ".join(suffix_parts)
 
         elo_line = f"🔥 Elo: {elo_avg:.2f}" if elo_avg is not None else "🔥 Elo: -"
         win_rate_line = (
