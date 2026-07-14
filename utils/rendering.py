@@ -1177,15 +1177,6 @@ def render_elo_graph_image(
             fill=_LB_TEXT_MUTED,
             font=season_font,
         )
-    if no_prev_data:
-        no_data_font = _load_latin_font(13 * GSCALE, bold=True)
-        draw.text(
-            (title_x, title_h + 4 * GSCALE),
-            "Previous month: No data available",
-            fill=_LB_TEXT_MUTED,
-            font=no_data_font,
-        )
-
     # ── stat boxes: AVG. WIN / AVG. LOSS / AVG. GAIN / FINAL ELO ────────
     stat_top = title_h + season_h + stat_gap
     box_gap = 8 * GSCALE
