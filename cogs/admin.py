@@ -1,7 +1,7 @@
 import discord
 from discord.ext import commands
 
-from utils import is_admin
+from utils import PRIVATE_GUILD_ID, is_admin
 
 
 class AdminCog(commands.Cog):
@@ -21,17 +21,27 @@ class AdminCog(commands.Cog):
         raise error
 
     @commands.command(
-        help="Send a message to a specific channel in another server (admin only)."
+        help="Send a message to a specific channel in another server (private/management guild only)."
     )
     @commands.check(is_admin)
     async def say(
         self, ctx: commands.Context, server_id: int, channel_name: str, *, message: str
     ):
         """
-        Send a message to a specific channel.
+        Send a message to a specific channel (private/management guild only).
         Usage: -say <server_id> <channel_name> <message>
         Example: -say 123456789 general Hello everyone!
         """
+        if ctx.guild is None or ctx.guild.id != PRIVATE_GUILD_ID:
+            await ctx.send(
+                embed=discord.Embed(
+                    title="Not Available",
+                    description="This command is only available in the private server.",
+                    color=discord.Color.red(),
+                )
+            )
+            return
+
         try:
             # Get the target guild
             target_guild = self.bot.get_guild(server_id)

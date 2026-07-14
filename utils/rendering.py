@@ -698,6 +698,13 @@ _GRAPH_COMPARE = (114, 190, 246)  # light blue used for "vs previous month" delt
 _GRAPH_AXIS_TEXT = _LB_TEXT_MUTED
 _GRAPH_GRID = _HIST_SEPARATOR
 _GRAPH_BOX_BG = _LB_ROW_HIGHLIGHT
+_GRAPH_REST_GAP_FILL = (79, 142, 247, 40)  # translucent blue band fill (rest period)
+_GRAPH_REST_GAP_BORDER = (79, 142, 247, 160)  # dashed blue band border (rest period)
+
+# (x_fraction_start, x_fraction_end) - one entry per multi-day inactivity
+# span on the same 0..1 calendar axis as GraphCalendarPoint/GraphAxisTick.
+# See utils.elo_graph.find_rest_gaps() / rest_gap_fractions().
+GraphRestGap = tuple[float, float]
 
 # (date_label, elo) - one point per CALENDAR DAY, oldest first, including
 # days the player didn't play. See utils.elo_graph.build_daily_series()
@@ -927,6 +934,28 @@ def _draw_round_segment(
         draw.ellipse((cx - r, cy - r, cx + r, cy + r), fill=color)
 
 
+def _draw_dashed_vline(
+    draw: ImageDraw.ImageDraw,
+    x: float,
+    y0: float,
+    y1: float,
+    color,
+    width: int,
+    *,
+    dash_on: int,
+    dash_off: int,
+) -> None:
+    """Draw a dashed vertical line from y0 to y1 at column x - used for
+    the rest-gap band borders so the boundary reads as visually distinct
+    from the solid horizontal/vertical grid lines drawn elsewhere."""
+    period = dash_on + dash_off
+    y = y0
+    while y < y1:
+        seg_end = min(y + dash_on, y1)
+        draw.line((x, y, x, seg_end), fill=color, width=width)
+        y += period
+
+
 def _draw_smooth_line(
     draw: ImageDraw.ImageDraw,
     points: list[tuple[float, float]],
@@ -1022,6 +1051,7 @@ def render_elo_graph_image(
     no_prev_data: bool = False,
     compare_series: list[GraphSeriesPoint] | None = None,
     axis_ticks: list[GraphAxisTick] | None = None,
+    rest_gaps: list[GraphRestGap] | None = None,
     axis_min: int = 300,
     axis_max: int = 1000,
     axis_rows: int = 7,
@@ -1070,6 +1100,14 @@ def render_elo_graph_image(
     auto-scaling to the data, matching ClashPerk's trophy graph. With the
     defaults (300..1000, 7 rows) this gives clean 100-point gridlines:
     300, 400, 500, 600, 700, 800, 900, 1000.
+
+    ``rest_gaps``, if given, is a list of (x_fraction_start,
+    x_fraction_end) spans on the same 0..1 calendar axis as ``series`` -
+    see utils.elo_graph.find_rest_gaps() / rest_gap_fractions(). Each
+    span is drawn as a translucent blue vertical band spanning the full
+    chart height, with a dashed blue border, so a multi-day stretch with
+    no match played reads as visually distinct from an ordinary stretch
+    of the line instead of blending in with the rest of the chart.
     """
     # Rendered at double the usual SCALE used by other cards (leaderboard,
     # history table, ...). The earlier anti-aliased curve layer fixed the
@@ -1275,6 +1313,37 @@ def render_elo_graph_image(
             (tx, chart_top, tx, chart_bottom), fill=_GRAPH_GRID, width=max(1, GSCALE // 2)
         )
 
+    # Rest-gap bands (multi-day stretches with no match played) - drawn
+    # on top of the grid but underneath the curve, so a genuine break in
+    # play reads as a distinct blue-shaded region instead of looking
+    # like an ordinary played stretch of the line. Uses its own RGBA
+    # overlay layer since the fill needs alpha transparency, which
+    # ImageDraw can't blend directly onto the (opaque) base image.
+    if rest_gaps:
+        gap_layer = Image.new("RGBA", (width_px, height_px), (0, 0, 0, 0))
+        gap_draw = ImageDraw.Draw(gap_layer)
+        dash_on = 4 * GSCALE
+        dash_off = 3 * GSCALE
+        border_width = max(1, GSCALE)
+        for frac_start, frac_end in rest_gaps:
+            gx0 = _x_for(frac_start)
+            gx1 = _x_for(frac_end)
+            gap_draw.rectangle(
+                (gx0, chart_top, gx1, chart_bottom), fill=_GRAPH_REST_GAP_FILL
+            )
+            for gx in (gx0, gx1):
+                _draw_dashed_vline(
+                    gap_draw,
+                    gx,
+                    chart_top,
+                    chart_bottom,
+                    _GRAPH_REST_GAP_BORDER,
+                    border_width,
+                    dash_on=dash_on,
+                    dash_off=dash_off,
+                )
+        img.paste(gap_layer, (0, 0), gap_layer)
+
     def _xs_for(count: int) -> list[float]:
         if count == 1:
             return [chart_x0 + (chart_x1 - chart_x0) / 2]
@@ -1398,6 +1467,7 @@ async def render_elo_graph_image_async(
     no_prev_data: bool = False,
     compare_series: list[GraphSeriesPoint] | None = None,
     axis_ticks: list[GraphAxisTick] | None = None,
+    rest_gaps: list[GraphRestGap] | None = None,
     axis_min: int = 300,
     axis_max: int = 1000,
     axis_rows: int = 7,
@@ -1423,6 +1493,7 @@ async def render_elo_graph_image_async(
         no_prev_data=no_prev_data,
         compare_series=compare_series,
         axis_ticks=axis_ticks,
+        rest_gaps=rest_gaps,
         axis_min=axis_min,
         axis_max=axis_max,
         axis_rows=axis_rows,

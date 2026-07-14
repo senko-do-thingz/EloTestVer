@@ -274,23 +274,22 @@ _register_many(
     _cmd(
         "revert",
         description=(
-            "Undo a previously confirmed match report (admin only). Revert reverses "
-            "the exact Elo, win/loss, and monthly-games changes that report applied, "
-            "then deletes the match from history. Use the same player IDs and scores "
-            "that were used in the original `/report` (or `/ad_rp`) - in the same "
-            "order - so the bot knows exactly which match to undo. It does not matter "
-            "who technically \"won\"; just re-enter player1_id/p1_score/p2_score/"
-            "player2_id exactly as reported."
+            "Undo a previously recorded match by its Match ID (admin only). "
+            "Use `-match_ids` to export every recorded match's ID in this "
+            "server to an Excel file, then pass that ID here. Revert reads "
+            "the exact Elo values stored for that match at report time, so "
+            "it restores both players' Elo precisely (no re-typing scores "
+            "or guessing which order they were reported in), reverses the "
+            "win/loss and monthly-games counts, and deletes the match from "
+            "history. Asks for reaction confirmation before applying."
         ),
-        syntax="-revert <player1_id> <p1_score> <p2_score> <player2_id>  |  -revert <player1_id> <combined_score> <player2_id>",
-        slash_syntax="/revert player1_id:<id> p1_score:<0-4> p2_score:<0-3> player2_id:<id>",
+        syntax="-revert <match_id>",
+        slash_syntax="/revert match_id:<id>",
         permission="Elo Bot Manager",
         examples=(
-            "If a match was reported with `-report @Senko 3 1 @Autony`, undo it with "
-            "`-revert <Senko_id> 3 1 <Autony_id>` - same scores, same order.",
-            "-revert 111 3 1 222",
-            "-revert 111 31 222",
-            "/revert player1_id:111 p1_score:3 p2_score:1 player2_id:222",
+            "-match_ids",
+            "-revert 482913",
+            "/revert match_id:482913",
         ),
         admin=True,
     ),
@@ -409,6 +408,372 @@ _register_many(
         admin=True,
         is_slash=False,
     ),
+    _cmd(
+        "msg",
+        description=(
+            "DM the bot to send a private message to the support team. Only "
+            "usable in the bot's DMs, not in a server. Each message is "
+            "relayed into a thread (named after you) in the support channel "
+            "the admins have configured."
+        ),
+        syntax="Not available as a prefix command.",
+        slash_syntax="/msg content:<text>",
+        examples=("/msg content:Hi, I found a bug with -report.",),
+    ),
+    _cmd(
+        "decay",
+        description=(
+            "Manually run Elo decay for all players (admin only). Also runs "
+            "automatically every calendar month. Shows a preview of every "
+            "player's Elo change and asks for reaction confirmation before "
+            "applying it. If the server's current month is the season's "
+            "last configured month (see /months), decay is skipped and a "
+            "season-end leaderboard export runs instead."
+        ),
+        syntax="-decay",
+        slash_syntax="Not available as a slash command.",
+        permission="Elo Bot Manager",
+        examples=("-decay",),
+        admin=True,
+        is_slash=False,
+    ),
+    _cmd(
+        "decay_setup",
+        description=(
+            "Set or clear the channel the automatic monthly -decay change "
+            "log is posted to (admin only)."
+        ),
+        syntax="-decay_setup <channel>  |  -decay_setup off",
+        slash_syntax="Not available as a slash command.",
+        permission="Elo Bot Manager",
+        examples=("-decay_setup #decay-log", "-decay_setup off"),
+        admin=True,
+        is_slash=False,
+    ),
+    _cmd(
+        "nickname",
+        description=(
+            "Assign a short nickname to a server ID, used purely for file "
+            "naming in -get_lb, -sum_lb, and the automatic monthly -decay "
+            "task (admin only). The prefix form works for any server's "
+            "admin, naming their own server. The slash form is only "
+            "available in the private/management guild, and can name any "
+            "server by ID."
+        ),
+        syntax="-nickname <server_id> <name>",
+        slash_syntax="/nickname server_id:<id> name:<text> (private guild only)",
+        permission="Elo Bot Manager",
+        examples=("-nickname 123456789012345678 QS", "/nickname server_id:123456789012345678 name:QS"),
+        admin=True,
+    ),
+    _cmd(
+        "get_lb",
+        description=(
+            "Export all leaderboard stats for this server to a zip file "
+            "containing separate text files for each stat (Elo, wins, "
+            "losses, win rate, monthly games played) (admin only)."
+        ),
+        syntax="-get_lb",
+        slash_syntax="Not available as a slash command.",
+        permission="Elo Bot Manager",
+        examples=("-get_lb",),
+        admin=True,
+        is_slash=False,
+    ),
+    _cmd(
+        "set_id",
+        description=(
+            "Sync all of this server's registered players' Discord IDs into "
+            "the archived lb/<server_id>/ leaderboard files (admin only)."
+        ),
+        syntax="-set_id <server_id>",
+        slash_syntax="Not available as a slash command.",
+        permission="Elo Bot Manager",
+        examples=("-set_id 123456789012345678",),
+        admin=True,
+        is_slash=False,
+    ),
+    _cmd(
+        "sum_lb",
+        description=(
+            "Calculate and export the total leaderboard for a specific "
+            "season from a given server's lb/ archive folder (admin only)."
+        ),
+        syntax="-sum_lb <server_id> <season>",
+        slash_syntax="Not available as a slash command.",
+        permission="Elo Bot Manager",
+        examples=("-sum_lb 123456789012345678 S2", "-sum_lb 123456789012345678 2"),
+        admin=True,
+        is_slash=False,
+    ),
+    _cmd(
+        "match_ids",
+        description=(
+            "Export every recorded match in this server to an Excel file, "
+            "showing each match's ID (needed for -revert <match_id>) plus "
+            "the exact date/time it was recorded (admin only)."
+        ),
+        syntax="-match_ids",
+        slash_syntax="Not available as a slash command.",
+        permission="Elo Bot Manager",
+        examples=("-match_ids",),
+        admin=True,
+        is_slash=False,
+    ),
+    _cmd(
+        "devmode",
+        description=(
+            "Toggle dev mode for this server (admin only). While enabled, "
+            "-report/-rp additionally shows a comparison against the "
+            "previous Elo formula, for debugging."
+        ),
+        syntax="-devmode",
+        slash_syntax="Not available as a slash command.",
+        permission="Elo Bot Manager",
+        examples=("-devmode",),
+        admin=True,
+        is_slash=False,
+    ),
+    _cmd(
+        "say",
+        description=(
+            "Send a message to a specific channel in another server the bot "
+            "is in (private/management guild only)."
+        ),
+        syntax="-say <server_id> <channel_name> <message>",
+        slash_syntax="Not available as a slash command.",
+        permission="Elo Bot Manager (private guild only)",
+        examples=("-say 123456789012345678 general Hello everyone!",),
+        admin=True,
+        private=True,
+        is_slash=False,
+    ),
+    _cmd(
+        "counting",
+        description=(
+            "Enable or disable the counting game in a channel of a given "
+            "server (admin only)."
+        ),
+        syntax="-counting <server_id> <channel_name> <enable|disable>",
+        slash_syntax="Not available as a slash command.",
+        permission="Elo Bot Manager",
+        examples=("-counting 123456789012345678 counting enable",),
+        admin=True,
+        is_slash=False,
+    ),
+    _cmd(
+        "ladd",
+        description="Create league ranges and sync roles across all registered players (admin only).",
+        syntax="-ladd <number>",
+        slash_syntax="Not available as a slash command.",
+        permission="Elo Bot Manager",
+        examples=("-ladd 5",),
+        admin=True,
+        is_slash=False,
+    ),
+    _cmd(
+        "ledit",
+        description="Edit league boundaries while keeping leagues non-overlapping (admin only).",
+        syntax="-ledit",
+        slash_syntax="Not available as a slash command.",
+        permission="Elo Bot Manager",
+        examples=("-ledit",),
+        admin=True,
+        is_slash=False,
+    ),
+    _cmd(
+        "lapply",
+        description="Re-apply league roles for all registered players based on current Elo (admin only).",
+        syntax="-lapply",
+        slash_syntax="Not available as a slash command.",
+        permission="Elo Bot Manager",
+        examples=("-lapply",),
+        admin=True,
+        is_slash=False,
+    ),
+    _cmd(
+        "lclear",
+        description="Remove all league roles from players and clear all leagues from the bot data (admin only).",
+        syntax="-lclear",
+        slash_syntax="Not available as a slash command.",
+        permission="Elo Bot Manager",
+        examples=("-lclear",),
+        admin=True,
+        is_slash=False,
+    ),
+    _cmd(
+        "lcancel",
+        description="Cancel any running league task in this channel (admin only).",
+        syntax="-lcancel",
+        slash_syntax="Not available as a slash command.",
+        permission="Elo Bot Manager",
+        examples=("-lcancel",),
+        admin=True,
+        is_slash=False,
+    ),
+    _cmd(
+        "lannounce",
+        description="Add a channel for league promotion/demotion announcements (admin only).",
+        syntax="-lannounce <channel>",
+        slash_syntax="Not available as a slash command.",
+        permission="Elo Bot Manager",
+        examples=("-lannounce #league-news",),
+        admin=True,
+        is_slash=False,
+    ),
+    _cmd(
+        "lrannounce",
+        description="Remove a channel from league promotion/demotion announcements (admin only).",
+        syntax="-lrannounce <channel>",
+        slash_syntax="Not available as a slash command.",
+        permission="Elo Bot Manager",
+        examples=("-lrannounce #league-news",),
+        admin=True,
+        is_slash=False,
+    ),
+    _cmd(
+        "ladmin",
+        description="Admin view of all leagues, both discovered and undiscovered (admin only).",
+        syntax="-ladmin [server_id]",
+        slash_syntax="Not available as a slash command.",
+        permission="Elo Bot Manager",
+        examples=("-ladmin", "-ladmin 123456789012345678"),
+        admin=True,
+        is_slash=False,
+    ),
+    _cmd(
+        "lhelp",
+        description="Show detailed help for all league-related commands.",
+        syntax="-lhelp",
+        slash_syntax="Not available as a slash command.",
+        permission="Elo Bot Manager",
+        examples=("-lhelp",),
+        admin=True,
+        is_slash=False,
+    ),
+    _cmd(
+        "lb_id",
+        description="View another server's leaderboard by server ID (private/management guild only).",
+        syntax="-lb_id <server_id>",
+        slash_syntax="Not available as a slash command.",
+        permission="Elo Bot Manager (private guild only)",
+        examples=("-lb_id 123456789012345678",),
+        admin=True,
+        private=True,
+        is_slash=False,
+    ),
+    _cmd(
+        "gld",
+        description=(
+            "Export another server's full leaderboard (Elo, wins, losses, "
+            "win rate, monthly games) as a zip file, by server ID "
+            "(private/management guild only)."
+        ),
+        syntax="-gld <server_id>",
+        slash_syntax="Not available as a slash command.",
+        permission="Elo Bot Manager (private guild only)",
+        examples=("-gld 123456789012345678",),
+        admin=True,
+        private=True,
+        is_slash=False,
+    ),
+    _cmd(
+        "st",
+        description=(
+            "View a player's stats in another server, by server ID and the "
+            "player's Discord ID (private/management guild only)."
+        ),
+        syntax="-st <server_id> <player_id>",
+        slash_syntax="Not available as a slash command.",
+        permission="Elo Bot Manager (private guild only)",
+        examples=("-st 123456789012345678 987654321098765432",),
+        admin=True,
+        private=True,
+        is_slash=False,
+    ),
+    _cmd(
+        "hpbd",
+        description=(
+            "Send a happy-birthday message to a user in another server's "
+            "#general channel (private/management guild only)."
+        ),
+        syntax="-hpbd <@user> <server_id>",
+        slash_syntax="Not available as a slash command.",
+        permission="Elo Bot Manager (private guild only)",
+        examples=("-hpbd @Senko 123456789012345678",),
+        admin=True,
+        private=True,
+        is_slash=False,
+    ),
+    _cmd(
+        "log",
+        description="Set or clear the channel the bot posts activity logs to (private/management guild only).",
+        syntax="-log <channel>  |  -log off",
+        slash_syntax="Not available as a slash command.",
+        permission="Elo Bot Manager (private guild only)",
+        examples=("-log #bot-log", "-log off"),
+        admin=True,
+        private=True,
+        is_slash=False,
+    ),
+    _cmd(
+        "support",
+        description=(
+            "Set or clear the channel /msg relays DM messages into "
+            "(private/management guild only)."
+        ),
+        syntax="-support <channel>  |  -support off",
+        slash_syntax="Not available as a slash command.",
+        permission="Elo Bot Manager (private guild only)",
+        examples=("-support #support-relay", "-support off"),
+        admin=True,
+        private=True,
+        is_slash=False,
+    ),
+    _cmd(
+        "status",
+        description="Show internal bot/process status: latency, loaded cogs/extensions, command count (private/management guild only).",
+        syntax="-status",
+        slash_syntax="Not available as a slash command.",
+        permission="Everyone (private guild only)",
+        examples=("-status",),
+        admin=True,
+        private=True,
+        is_slash=False,
+    ),
+    _cmd(
+        "ban_msg",
+        description="Ban a user from using /msg, with an optional reason (private/management guild only).",
+        syntax="-ban_msg <discord_id> [reason]",
+        slash_syntax="Not available as a slash command.",
+        permission="Elo Bot Manager (private guild only)",
+        examples=("-ban_msg 123456789012345678 spam",),
+        admin=True,
+        private=True,
+        is_slash=False,
+    ),
+    _cmd(
+        "unban_msg",
+        description="Unban a user from using /msg, with an optional reason (private/management guild only). Also DMs the user that they've been unbanned.",
+        syntax="-unban_msg <discord_id> [reason]",
+        slash_syntax="Not available as a slash command.",
+        permission="Elo Bot Manager (private guild only)",
+        examples=("-unban_msg 123456789012345678",),
+        admin=True,
+        private=True,
+        is_slash=False,
+    ),
+    _cmd(
+        "lbs_id",
+        description="View archived seasonal leaderboards for another server, by server ID (private/management guild only).",
+        syntax="-lbs_id <server_id>",
+        slash_syntax="Not available as a slash command.",
+        permission="Elo Bot Manager (private guild only)",
+        examples=("-lbs_id 123456789012345678",),
+        admin=True,
+        private=True,
+        is_slash=False,
+    ),
 )
 
 
@@ -451,6 +816,19 @@ def admin_command_names() -> list[str]:
     names: list[str] = []
     for entry in COMMAND_HELP.values():
         if not entry.admin:
+            continue
+        names.append(entry.name)
+        names.extend(entry.aliases)
+    return sorted(set(names))
+
+
+def private_command_names() -> list[str]:
+    """Command names (+ aliases) for entries only usable in the private/
+    management guild. Used to strip these out of /adhelp's autocomplete
+    (and to reject direct detail lookups) everywhere else."""
+    names: list[str] = []
+    for entry in COMMAND_HELP.values():
+        if not entry.private:
             continue
         names.append(entry.name)
         names.extend(entry.aliases)

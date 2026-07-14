@@ -15,6 +15,8 @@ from utils.elo_graph import (
     build_match_series,
     calendar_axis_bounds,
     compute_month_averages,
+    find_rest_gaps,
+    rest_gap_fractions,
 )
 
 
@@ -298,3 +300,99 @@ class TestBuildCalendarSeries:
         assert len(points) == 2
         assert len(axis_ticks) == 32
         assert [elo for _, elo in points] == [480, 540]
+
+
+class TestFindRestGaps:
+    def test_no_gap_below_threshold(self):
+        # Consecutive days (0 empty days between them) - not a rest gap.
+        rows = [
+            _row(1, 2, 0, 500, 540, _ts_for_day(date(2026, 7, 5))),
+            _row(2, 2, 0, 540, 560, _ts_for_day(date(2026, 7, 6))),
+        ]
+        assert find_rest_gaps(rows) == []
+
+    def test_single_skipped_day_is_not_a_gap_by_default(self):
+        # 1 empty day strictly between two active days - below the
+        # default threshold of 2, so not flagged as a rest period.
+        rows = [
+            _row(1, 2, 0, 500, 540, _ts_for_day(date(2026, 7, 5))),
+            _row(2, 2, 0, 540, 560, _ts_for_day(date(2026, 7, 7))),
+        ]
+        assert find_rest_gaps(rows) == []
+
+    def test_multi_day_gap_is_flagged(self):
+        # 3 empty days strictly between the two active days.
+        rows = [
+            _row(1, 2, 0, 500, 540, _ts_for_day(date(2026, 7, 5))),
+            _row(2, 2, 0, 540, 560, _ts_for_day(date(2026, 7, 9))),
+        ]
+        assert find_rest_gaps(rows) == [(date(2026, 7, 5), date(2026, 7, 9))]
+
+    def test_custom_threshold(self):
+        rows = [
+            _row(1, 2, 0, 500, 540, _ts_for_day(date(2026, 7, 5))),
+            _row(2, 2, 0, 540, 560, _ts_for_day(date(2026, 7, 7))),
+        ]
+        # 1 empty day - flagged when the threshold is lowered to 1.
+        assert find_rest_gaps(rows, gap_threshold_days=1) == [
+            (date(2026, 7, 5), date(2026, 7, 7))
+        ]
+
+    def test_same_day_matches_produce_no_gap(self):
+        base_ts = _ts_for_day(date(2026, 7, 5))
+        rows = [
+            _row(1, 2, 0, 500, 540, base_ts),
+            _row(2, 0, 2, 540, 510, base_ts + 60),
+        ]
+        assert find_rest_gaps(rows) == []
+
+    def test_fewer_than_two_active_days(self):
+        assert find_rest_gaps([]) == []
+        rows = [_row(1, 2, 0, 500, 540, _ts_for_day(date(2026, 7, 5)))]
+        assert find_rest_gaps(rows) == []
+
+    def test_real_anchor_date_can_open_a_gap(self):
+        anchor_date = date(2026, 6, 20)
+        rows = [_row(1, 2, 0, 500, 540, _ts_for_day(date(2026, 7, 5)))]
+        assert find_rest_gaps(rows, anchor_date=anchor_date) == [
+            (date(2026, 6, 20), date(2026, 7, 5))
+        ]
+
+    def test_multiple_gaps_returned_in_order(self):
+        rows = [
+            _row(1, 2, 0, 500, 540, _ts_for_day(date(2026, 7, 1))),
+            _row(2, 2, 0, 540, 560, _ts_for_day(date(2026, 7, 5))),
+            _row(3, 2, 0, 560, 580, _ts_for_day(date(2026, 7, 6))),
+            _row(4, 2, 0, 580, 600, _ts_for_day(date(2026, 7, 12))),
+        ]
+        assert find_rest_gaps(rows) == [
+            (date(2026, 7, 1), date(2026, 7, 5)),
+            (date(2026, 7, 6), date(2026, 7, 12)),
+        ]
+
+
+class TestRestGapFractions:
+    def test_empty_gaps(self):
+        assert rest_gap_fractions([], axis_start=date(2026, 6, 30), total_days=32) == []
+
+    def test_converts_to_matching_axis_fractions(self):
+        rows = [
+            _row(1, 2, 0, 500, 540, _ts_for_day(date(2026, 7, 5))),
+            _row(2, 2, 0, 540, 560, _ts_for_day(date(2026, 7, 9))),
+        ]
+        gaps = find_rest_gaps(rows)
+        bounds = calendar_axis_bounds(rows)
+        axis_start, axis_end = bounds
+        total_days = (axis_end - axis_start).days + 1
+        fractions = rest_gap_fractions(gaps, axis_start=axis_start, total_days=total_days)
+
+        # The band's edges should line up exactly with the same
+        # day-index-over-total_days fractions used for axis_ticks.
+        _, axis_ticks = build_calendar_series(rows)
+        tick_frac = dict((label, frac) for frac, label in axis_ticks)
+        assert fractions == [(tick_frac["07-05"], tick_frac["07-09"])]
+
+    def test_zero_total_days_returns_empty(self):
+        assert rest_gap_fractions(
+            [(date(2026, 7, 5), date(2026, 7, 9))], axis_start=date(2026, 7, 5), total_days=0
+        ) == []

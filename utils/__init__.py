@@ -56,7 +56,10 @@ from .elo_graph import (  # noqa: F401
     build_calendar_series,
     build_daily_series,
     build_match_series,
+    calendar_axis_bounds,
     compute_month_averages,
+    find_rest_gaps,
+    rest_gap_fractions,
 )
 from .logger import bot_log, PRIVATE_GUILD_ID  # noqa: F401
 

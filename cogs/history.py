@@ -27,9 +27,12 @@ from db.match_history_db import (
 from utils import (
     build_calendar_series,
     build_match_series,
+    calendar_axis_bounds,
     compute_month_averages,
+    find_rest_gaps,
     render_elo_graph_image_async,
     render_history_image_async,
+    rest_gap_fractions,
     truncate_cjk_name,
 )
 from utils.slash_ctx import SlashContext
@@ -500,6 +503,23 @@ class HistoryView(discord.ui.LayoutView):
             anchor_before_first_match=anchor_before_first_match,
         )
 
+        # Multi-day stretches with no match played ("rest periods"),
+        # shaded on the chart so a genuine break in play is visually
+        # distinct from an ordinary played stretch of the line. Uses the
+        # REAL previous-month carry-over date (``anchor_date``), not
+        # ``series_anchor_date``, since a synthetic "before first match"
+        # anchor is not an actual day of activity and must not be
+        # treated as one here (see find_rest_gaps()'s docstring).
+        rest_gaps: list[tuple[float, float]] = []
+        axis_bounds = calendar_axis_bounds(rows_chronological, anchor_date=anchor_date)
+        if axis_bounds is not None:
+            axis_start, axis_end = axis_bounds
+            total_days = (axis_end - axis_start).days + 1
+            gaps = find_rest_gaps(rows_chronological, anchor_date=anchor_date)
+            rest_gaps = rest_gap_fractions(
+                gaps, axis_start=axis_start, total_days=total_days
+            )
+
         # The y-axis defaults to 300-1000, but must never clamp a real elo
         # value that falls outside that range (see Q1): extend the axis to
         # cover the actual data instead of hard-clamping the drawn line.
@@ -527,6 +547,7 @@ class HistoryView(discord.ui.LayoutView):
             no_prev_data=prev is None,
             compare_series=compare_series,
             axis_ticks=axis_ticks,
+            rest_gaps=rest_gaps,
             axis_min=axis_min,
             axis_max=axis_max,
         )

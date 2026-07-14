@@ -51,7 +51,6 @@ _ADMIN_COMMANDS = {
     "devmode",
     "ladmin", "ledit", "ladd", "lapply", "lclear",
     "lannounce", "lrannounce",
-    "set_lan",
     "log", "support",
 }
 # "decay" and "decay_setup" are intentionally NOT in _ADMIN_COMMANDS: both

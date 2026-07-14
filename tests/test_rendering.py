@@ -307,6 +307,38 @@ class TestRenderEloGraphImage:
         data = buf.read()
         assert data[:4] == b"\x89PNG"
 
+    def test_rest_gaps_render_without_raising(self):
+        from utils.rendering import render_elo_graph_image
+        buf = render_elo_graph_image(
+            SAMPLE_GRAPH_SERIES,
+            title="With rest gap",
+            axis_ticks=SAMPLE_AXIS_TICKS,
+            rest_gaps=[(0.2, 0.6)],
+        )
+        assert _open_buf(buf).format == "PNG"
+
+    def test_rest_gaps_pixels_differ_from_no_gaps(self):
+        # A rest-gap band should visibly change the rendered image (the
+        # shaded region), not just be silently accepted and ignored.
+        from utils.rendering import render_elo_graph_image
+        buf_without = render_elo_graph_image(
+            SAMPLE_GRAPH_SERIES, title="No gap", axis_ticks=SAMPLE_AXIS_TICKS
+        )
+        buf_with = render_elo_graph_image(
+            SAMPLE_GRAPH_SERIES,
+            title="No gap",
+            axis_ticks=SAMPLE_AXIS_TICKS,
+            rest_gaps=[(0.2, 0.6)],
+        )
+        assert buf_without.getvalue() != buf_with.getvalue()
+
+    def test_empty_rest_gaps_list_does_not_raise(self):
+        from utils.rendering import render_elo_graph_image
+        buf = render_elo_graph_image(
+            SAMPLE_GRAPH_SERIES, title="Empty rest gaps", rest_gaps=[]
+        )
+        assert _open_buf(buf).format == "PNG"
+
 
 class TestRenderEloGraphImageAsync:
     def test_async_returns_same_result(self):

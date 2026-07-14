@@ -24,6 +24,12 @@ used by callers:
   fabricated elo values) - but positioned on a real calendar timeline
   instead of evenly spaced by index, and paired with a pre-generated
   set of axis tick days covering the whole month (see its docstring).
+- find_rest_gaps() / rest_gap_fractions(): detect multi-day spans with
+  no match played at all ("rest periods") between two active days, and
+  convert them to the same 0..1 x-axis fractions as
+  build_calendar_series(), so the -graph card can shade them with a
+  distinct color instead of leaving them looking like an ordinary
+  (played) stretch of the line.
 """
 
 from __future__ import annotations
@@ -321,3 +327,82 @@ def build_calendar_series(
             points.append((fraction, row.elo_final))
 
     return points, axis_ticks
+
+
+# A "rest period" needs at least this many fully empty calendar days
+# strictly between two active days before it's flagged - a single
+# skipped day is normal day-to-day play, not a genuine break.
+DEFAULT_REST_GAP_THRESHOLD_DAYS = 2
+
+
+def find_rest_gaps(
+    rows_chronological: list[MatchHistoryRow],
+    *,
+    anchor_date: date | None = None,
+    gap_threshold_days: int = DEFAULT_REST_GAP_THRESHOLD_DAYS,
+) -> list[tuple[date, date]]:
+    """Find multi-day inactivity spans ("rest periods") between matches,
+    for the -graph card's rest-period highlighting.
+
+    Returns one ``(last_active_day, next_active_day)`` pair per gap
+    where the player went at least ``gap_threshold_days`` full calendar
+    days without a single match between two active days - e.g. the
+    default of 2 flags a 3+ day span (2+ fully empty days strictly
+    between the two active days) but leaves a single skipped day alone.
+
+    ``anchor_date``, if given, is treated as a genuine previous-month
+    carry-over active day (same meaning as in build_calendar_series())
+    and can itself open a gap leading into this month's first match.
+    Callers that only have the SYNTHETIC "before first match" anchor
+    (``anchor_before_first_match=True`` in build_calendar_series(), no
+    real ``anchor_date``) must not pass one here either, since that
+    anchor is not a real day of activity and would fabricate a rest
+    period that never happened.
+
+    Only days that actually have a match in ``rows_chronological``
+    (plus the optional real anchor) count as "active" - unplayed days
+    are never fabricated, matching every other function in this
+    module. The returned pairs are sorted chronologically and, being
+    derived from a set, contain no duplicates even if several matches
+    share the same day.
+    """
+    active_days: set[date] = set()
+    for row in rows_chronological:
+        active_days.add(datetime.fromtimestamp(row.played_at, tz=timezone.utc).date())
+    if anchor_date is not None:
+        active_days.add(anchor_date)
+
+    sorted_days = sorted(active_days)
+    if len(sorted_days) < 2:
+        return []
+
+    gaps: list[tuple[date, date]] = []
+    for prev_day, next_day in zip(sorted_days, sorted_days[1:]):
+        empty_days = (next_day - prev_day).days - 1
+        if empty_days >= gap_threshold_days:
+            gaps.append((prev_day, next_day))
+    return gaps
+
+
+def rest_gap_fractions(
+    rest_gaps: list[tuple[date, date]],
+    *,
+    axis_start: date,
+    total_days: int,
+) -> list[tuple[float, float]]:
+    """Convert ``(start_day, end_day)`` rest gaps (see find_rest_gaps())
+    into ``(x_fraction, x_fraction)`` spans on the same 0..1 calendar
+    axis used by build_calendar_series() - ``axis_start`` and
+    ``total_days`` should come from calendar_axis_bounds() for the same
+    reference point, so a shaded gap band lines up exactly with the day
+    gridlines/labels it spans.
+
+    Returns an empty list if ``total_days`` is not positive (nothing to
+    position a fraction against).
+    """
+    if total_days <= 0:
+        return []
+    return [
+        ((start - axis_start).days / total_days, (end - axis_start).days / total_days)
+        for start, end in rest_gaps
+    ]

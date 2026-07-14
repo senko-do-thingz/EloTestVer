@@ -10,10 +10,27 @@ from utils.command_registry import (
     CommandHelp,
     admin_command_names,
     lookup_command_help,
+    private_command_names,
     public_command_names,
 )
 from utils.guards import is_admin
 from utils.logger import PRIVATE_GUILD_ID
+
+
+def _lookup_command_help_scoped(
+    raw: str | None, guild_id: int | None
+) -> CommandHelp | None:
+    """Same as lookup_command_help(), but returns None (i.e. "not found")
+    for private/management-guild-only commands when looked up from any
+    other guild. This keeps -help/-adhelp/-lhelp <command> from leaking
+    the existence or details of private-only commands (-lb_id, -status,
+    -ban_msg, etc.) to other servers."""
+    entry = lookup_command_help(raw)
+    if entry is None:
+        return None
+    if entry.private and guild_id != PRIVATE_GUILD_ID:
+        return None
+    return entry
 
 
 async def help_command_autocomplete(
@@ -31,6 +48,13 @@ async def adhelp_command_autocomplete(
     interaction: discord.Interaction, current: str
 ) -> list[app_commands.Choice[str]]:
     names = admin_command_names()
+    guild_id = interaction.guild.id if interaction.guild else None
+    if guild_id != PRIVATE_GUILD_ID:
+        # Strip out private/management-guild-only commands (-lb_id, -gld,
+        # -status, -ban_msg, etc.) so admins on other servers never see
+        # them suggested - they wouldn't be able to view or run them here.
+        hidden = set(private_command_names())
+        names = [n for n in names if n not in hidden]
     return await command_name_autocomplete(interaction, current, names=names)
 
 
@@ -90,6 +114,7 @@ def _general_commands_list(guild_id: int) -> list[tuple[str, str]]:
         commands_list.extend(
             [
                 ("-lb_id <server_id>", "View another server's leaderboard."),
+                ("-lbs_id <server_id>", "View another server's archived seasonal leaderboards."),
                 ("-gld <server_id>", "Export another server's full leaderboard."),
                 ("-st <server_id> <player_id>", "View a player's stats in another server."),
                 ("-log [<channel> | off]", "Set or clear the bot log channel."),
@@ -99,6 +124,8 @@ def _general_commands_list(guild_id: int) -> list[tuple[str, str]]:
                     "-support [<channel> | off]",
                     "Set or clear the channel /msg relays DM messages into.",
                 ),
+                ("-ban_msg <discord_id> [reason]", "Ban a user from using /msg."),
+                ("-unban_msg <discord_id> [reason]", "Unban a user from using /msg."),
             ]
         )
     return commands_list
@@ -198,7 +225,8 @@ class HelpCog(commands.Cog):
 
     async def _help_impl(self, ctx: commands.Context, command: str | None = None) -> None:
         if command:
-            entry = lookup_command_help(command)
+            guild_id = ctx.guild.id if ctx.guild else None
+            entry = _lookup_command_help_scoped(command, guild_id)
             if entry is None:
                 await ctx.send(
                     embed=discord.Embed(
@@ -285,7 +313,8 @@ class HelpCog(commands.Cog):
     @commands.check(is_admin)
     async def adhelp(self, ctx: commands.Context, command: str | None = None):
         if command:
-            entry = lookup_command_help(command)
+            guild_id = ctx.guild.id if ctx.guild else None
+            entry = _lookup_command_help_scoped(command, guild_id)
             if entry is None:
                 await ctx.send(
                     embed=discord.Embed(
@@ -351,9 +380,9 @@ class HelpCog(commands.Cog):
             ),
             (
                 "-revert / /revert",
-                "Undo a previously confirmed match report. Use the same player1_id, "
-                "p1_score, p2_score, player2_id (same order) as the original /report "
-                "to reverse it. Use `-help revert` for details.",
+                "Undo a previously recorded match by its Match ID. Look up the "
+                "ID with `-match_ids`, then run `-revert <match_id>`. Use "
+                "`-help revert` for details.",
             ),
             (
                 "/months",
@@ -363,6 +392,46 @@ class HelpCog(commands.Cog):
                 "/season",
                 "Update the current season and month for this server. Requires "
                 "/months to be set first.",
+            ),
+        ]
+        misc_commands = [
+            (
+                "-nickname <server_id> <name>",
+                "Assign this server's nickname, used for -get_lb/-sum_lb/-decay file names.",
+            ),
+            ("-devmode", "Toggle dev mode (adds a formula comparison to -report/-rp)."),
+            (
+                "-counting <server_id> <channel_name> <enable|disable>",
+                "Enable or disable the counting game in a channel.",
+            ),
+            ("-match_ids", "Export every recorded match's ID to an Excel file."),
+            ("-ladd <number>", "Create league ranges and sync roles."),
+            ("-ledit", "Edit league boundaries."),
+            ("-lapply", "Re-apply league roles for all registered players."),
+            ("-lclear", "Remove all league roles and clear all leagues."),
+            ("-lcancel", "Cancel any running league task in this channel."),
+            ("-lannounce <channel>", "Add a channel for league promotion/demotion announcements."),
+            ("-lrannounce <channel>", "Remove a channel from league announcements."),
+            ("-ladmin [server_id]", "Admin view: show all leagues (discovered and undiscovered)."),
+            ("-lhelp", "Show detailed help for all league-related commands."),
+        ]
+        private_commands = [
+            ("-lb_id <server_id>", "View another server's leaderboard."),
+            ("-lbs_id <server_id>", "View another server's archived seasonal leaderboards."),
+            ("-gld <server_id>", "Export another server's full leaderboard."),
+            ("-st <server_id> <player_id>", "View a player's stats in another server."),
+            ("-log [<channel> | off]", "Set or clear the bot log channel."),
+            ("-hpbd <@user> <server_id>", "Send a birthday message in another server."),
+            ("-status", "Show internal bot/process status."),
+            (
+                "-support [<channel> | off]",
+                "Set or clear the channel /msg relays DM messages into.",
+            ),
+            ("-ban_msg <discord_id> [reason]", "Ban a user from using /msg."),
+            ("-unban_msg <discord_id> [reason]", "Unban a user from using /msg."),
+            (
+                "-say <server_id> <channel_name> <message>",
+                "Send a message to a channel in another server.",
             ),
         ]
         admin_commands = {
@@ -383,34 +452,41 @@ class HelpCog(commands.Cog):
                     "-rename_oid",
                     "Rename another player by Discord ID (no cooldown).",
                 ),
-                ("-d_reg <@player>", "Delete a player's registration."),
-                (
-                    "-did_reg <discord_id>",
-                    "Delete a player's registration using their Discord ID.",
-                ),
                 ("-c_reg", "Clear all registered player data."),
-                (
-                    "-db_d <server_id> <id>",
-                    "Delete a player's data using their ID stored in the Database.",
-                ),
                 ("-get_lb", "Get the leaderboard from the Database."),
                 (
                     "-set_id <server_id>",
                     "Sync all registered players' Discord IDs into archived lb/<server_id>/ files.",
                 ),
                 (
-                    "-sum_lb <season>",
+                    "-sum_lb <server_id> <season>",
                     "Calculate total leaderboard for a specific season (e.g., S2, Season 2).",
                 ),
             ],
             "stats": stats_commands,
+            "misc": misc_commands,
         }
+        page_order = ["register", "stats", "misc"]
+        page_titles = {
+            "register": "📜 Admin Help - Registration Commands",
+            "stats": "📜 Admin Help - Stats Commands",
+            "misc": "📜 Admin Help - League & Misc Commands",
+        }
+        # The private/management-guild-only commands (lb_id, gld, st, hpbd,
+        # log, support, status, ban_msg, unban_msg, lbs_id) only get their
+        # own page when -adhelp is run from that guild - so admins on every
+        # other server see the exact same 3 pages, with no trace that these
+        # commands exist at all.
+        if ctx.guild is not None and ctx.guild.id == PRIVATE_GUILD_ID:
+            admin_commands["private"] = private_commands
+            page_order.append("private")
+            page_titles["private"] = "📜 Admin Help - Private Server Commands"
 
         class AdminHelpView(discord.ui.View):
             def __init__(self):
                 super().__init__()
                 self.page = 0
-                self.total_pages = 2
+                self.total_pages = len(page_order)
                 self.update_buttons()
 
             def update_buttons(self):
@@ -426,12 +502,8 @@ class HelpCog(commands.Cog):
                 await interaction.response.edit_message(embed=embed, view=self)
 
             def create_embed(self):
-                page_type = "register" if self.page == 0 else "stats"
-                title = (
-                    "📜 Admin Help - Registration Commands"
-                    if self.page == 0
-                    else "📜 Admin Help - Stats Commands"
-                )
+                page_type = page_order[self.page]
+                title = page_titles[page_type]
                 embed = discord.Embed(
                     title=title,
                     description=(
