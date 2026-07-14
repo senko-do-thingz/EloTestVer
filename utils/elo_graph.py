@@ -64,7 +64,14 @@ def compute_month_averages(rows_chronological: list[MatchHistoryRow]) -> MonthAv
     - AVG. WIN: average elo_delta across rows the player won (wins > losses).
     - AVG. LOSS: average elo_delta across rows the player lost (already
       negative, so it prints the same way the original AVG. DEFENSE did).
-    - AVG. GAIN: AVG. WIN + AVG. LOSS, i.e. the net average change per match.
+    - AVG. GAIN: total elo_delta across ALL rows (wins and losses combined)
+      divided by the total number of sets played, i.e. the set-count-
+      weighted net average change per set. This is deliberately NOT
+      AVG. WIN + AVG. LOSS - that sum implicitly treats wins and losses as
+      1:1 regardless of how many of each were actually played, so a player
+      who mostly wins would still see a small AVG. GAIN dragged down by a
+      handful of losses. Weighting by actual set counts keeps AVG. GAIN
+      representative of the real win/loss split shown on the graph.
     - FINAL ELO: elo_final of the most recent match this month, or None if
       there were no matches at all.
     """
@@ -73,7 +80,10 @@ def compute_month_averages(rows_chronological: list[MatchHistoryRow]) -> MonthAv
 
     avg_win = round(sum(win_deltas) / len(win_deltas)) if win_deltas else 0
     avg_loss = round(sum(loss_deltas) / len(loss_deltas)) if loss_deltas else 0
-    avg_gain = avg_win + avg_loss
+    total_sets = len(win_deltas) + len(loss_deltas)
+    avg_gain = (
+        round((sum(win_deltas) + sum(loss_deltas)) / total_sets) if total_sets else 0
+    )
     final_elo = rows_chronological[-1].elo_final if rows_chronological else None
 
     return MonthAverages(

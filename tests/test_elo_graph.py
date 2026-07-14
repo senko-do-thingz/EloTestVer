@@ -72,8 +72,29 @@ class TestComputeMonthAverages:
         avgs = compute_month_averages(rows)
         assert avgs.avg_win == round((40 + 35) / 2)
         assert avgs.avg_loss == -30
-        assert avgs.avg_gain == avgs.avg_win + avgs.avg_loss
+        # Weighted by actual set count (2 wins, 1 loss), not a plain
+        # avg_win + avg_loss sum: (40 + 35 - 30) / 3.
+        assert avgs.avg_gain == round((40 + 35 - 30) / 3)
         assert avgs.final_elo == 545
+
+    def test_lopsided_win_loss_count_skews_gain_toward_wins(self):
+        # 4 wins (+30 each) against a single -30 loss should pull AVG. GAIN
+        # much closer to AVG. WIN than a naive avg_win + avg_loss (which
+        # would give 0 here, implying no net progress despite a heavily
+        # winning record).
+        rows = [
+            _row(1, 2, 0, 500, 530, 1000),  # win, +30
+            _row(2, 2, 0, 530, 560, 2000),  # win, +30
+            _row(3, 2, 0, 560, 590, 3000),  # win, +30
+            _row(4, 2, 0, 590, 620, 4000),  # win, +30
+            _row(5, 0, 2, 620, 590, 5000),  # loss, -30
+        ]
+        avgs = compute_month_averages(rows)
+        assert avgs.avg_win == 30
+        assert avgs.avg_loss == -30
+        naive_sum = avgs.avg_win + avgs.avg_loss  # would be 0
+        assert avgs.avg_gain != naive_sum
+        assert avgs.avg_gain == round((30 * 4 - 30) / 5)  # 18
 
     def test_tie_counts_as_loss_bucket(self):
         # wins == losses is treated as "not a win" for bucketing purposes,

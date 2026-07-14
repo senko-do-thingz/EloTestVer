@@ -8,7 +8,7 @@ from __future__ import annotations
 import discord
 from discord.ext import commands
 
-from db.elo_db import db_connection
+from db.elo_db import db_connection, get_nickname
 from db.match_history_db import get_all_match_history_rows
 from utils import is_admin
 from utils.logger import bot_log
@@ -48,15 +48,21 @@ class MatchIdsCog(commands.Cog):
             )
             return
 
+        # Same nickname convention as -decay's db_backup_filename(): use the
+        # server nickname set via -nickname if one exists, otherwise fall
+        # back to the raw guild id, so archives/exports stay identifiable
+        # by the same short name across both commands.
+        nickname = get_nickname(guild_id) or str(guild_id)
+
         workbook = build_match_listing_workbook(
             rows,
             name_lookup,
             sheet_title="Match IDs",
-            header_text=f"Server {guild_id} - All Recorded Matches",
+            header_text=f"Server {nickname} - All Recorded Matches",
         )
         buf = workbook_to_file_bytes(workbook)
 
-        filename = f"{_sanitize_filename(str(guild_id))}_match_ids.xlsx"
+        filename = f"{_sanitize_filename(nickname)}_match_ids.xlsx"
         await ctx.send(
             content=(
                 f"Match ID export - {len(rows)} match row(s). "
