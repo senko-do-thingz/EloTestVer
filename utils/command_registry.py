@@ -423,12 +423,17 @@ _register_many(
     _cmd(
         "decay",
         description=(
-            "Manually run Elo decay for all players (admin only). Also runs "
-            "automatically every calendar month. Shows a preview of every "
-            "player's Elo change and asks for reaction confirmation before "
-            "applying it. If the server's current month is the season's "
-            "last configured month (see /months), decay is skipped and a "
-            "season-end leaderboard export runs instead."
+            "With dev mode off (see -devmode), shows the time remaining "
+            "until the next automatic Elo decay, using Discord's own "
+            "timestamp formatting (admin only). With dev mode on, manually "
+            "runs Elo decay for all players instead: shows a preview of "
+            "every player's Elo change and asks for reaction confirmation "
+            "before applying it. Elo decay also runs automatically every "
+            "calendar month regardless of dev mode. If the server's "
+            "current month is the season's last configured month (see "
+            "/months), decay is skipped, a season-end leaderboard export "
+            "runs instead, and -c_reg runs automatically right after with "
+            "no separate confirmation."
         ),
         syntax="-decay",
         slash_syntax="Not available as a slash command.",

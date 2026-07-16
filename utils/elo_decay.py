@@ -7,6 +7,7 @@ identical decay math and produce identically formatted change logs.
 
 from __future__ import annotations
 
+import datetime as dt
 import math
 import os
 
@@ -28,6 +29,34 @@ from db.match_history_db import (
 from utils.league import get_league_announce_channels
 from utils.logger import PRIVATE_GUILD_ID
 from utils.match_export import build_match_listing_workbook, workbook_to_file_bytes
+
+# The automatic monthly decay task (cogs/admin_elo/decay_auto.py) fires at
+# this UTC time on the 1st of every calendar month. Defined here (single
+# source of truth) so both decay_auto.py's scheduled loop and -decay's
+# "time remaining" preview (dev mode off, see cogs/admin_elo/decay.py) can
+# never drift apart.
+DECAY_AUTO_RUN_TIME_UTC = dt.time(hour=0, minute=10, second=0, tzinfo=dt.timezone.utc)
+
+
+def next_scheduled_decay_run(now: dt.datetime | None = None) -> dt.datetime:
+    """The next UTC datetime the automatic monthly decay task will fire:
+    the next day-1-of-month at DECAY_AUTO_RUN_TIME_UTC strictly after
+    `now` (defaults to the current time). Used by -decay's dev-mode-off
+    "time remaining" preview."""
+    now = now or dt.datetime.now(dt.timezone.utc)
+    candidate = now.replace(
+        day=1,
+        hour=DECAY_AUTO_RUN_TIME_UTC.hour,
+        minute=DECAY_AUTO_RUN_TIME_UTC.minute,
+        second=DECAY_AUTO_RUN_TIME_UTC.second,
+        microsecond=0,
+    )
+    if candidate <= now:
+        if candidate.month == 12:
+            candidate = candidate.replace(year=candidate.year + 1, month=1)
+        else:
+            candidate = candidate.replace(month=candidate.month + 1)
+    return candidate
 
 
 async def post_decay_log(bot: commands.Bot, guild_id: int, embed: discord.Embed) -> None:
@@ -53,9 +82,23 @@ async def post_decay_log(bot: commands.Bot, guild_id: int, embed: discord.Embed)
         pass
 
 
-def season_end_notice(season: int) -> str:
+def season_end_notice(season: int, *, auto_clear_registrations: bool = False) -> str:
     """The exact message shown/logged when -decay is run on the last
-    configured month of a season, in place of applying Elo decay."""
+    configured month of a season, in place of applying Elo decay.
+
+    ``auto_clear_registrations`` is True only for the manual -decay
+    command (cogs/admin_elo/decay.py), which now runs -c_reg itself with
+    no separate confirmation step. The automatic monthly task
+    (cogs/admin_elo/decay_auto.py) still leaves that to the admin, so it
+    keeps the original wording.
+    """
+    if auto_clear_registrations:
+        return (
+            f"Because this is the final month of Season {season}, no Elo "
+            f"decay has been applied. `-c_reg` has been run automatically "
+            f"(no separate confirmation needed) so everything starts fresh "
+            f"for the next season."
+        )
     return (
         f"Because this is the final month of Season {season}, no Elo decay "
         f"has been applied. Use `-c_reg` so everything starts fresh for the "

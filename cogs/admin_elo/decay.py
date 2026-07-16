@@ -17,6 +17,7 @@ from db.elo_db import (
     db_connection,
     advance_season_month_cursor,
     get_decay_log_channel_id,
+    get_dev_mode,
     get_max_month,
     get_season_month,
     set_decay_log_channel_id,
@@ -29,6 +30,7 @@ from utils.elo_decay import (
     chunk_decay_summary,
     export_month_snapshot,
     export_season_overall,
+    next_scheduled_decay_run,
     post_decay_log,
     purge_old_match_history,
     season_end_notice,
@@ -41,6 +43,7 @@ from utils.lb_cache import (
 from utils.logger import bot_log
 
 from .base import AdminEloBaseCog
+from .registration import clear_all_registrations
 
 
 class AdminEloDecayCog(AdminEloBaseCog):
@@ -190,16 +193,50 @@ class AdminEloDecayCog(AdminEloBaseCog):
             },
         )
 
-    @commands.command()
+    @commands.command(
+        help=(
+            "With dev mode off (see -devmode): show the time remaining "
+            "before the next automatic Elo decay, using Discord's own "
+            "timestamp formatting. With dev mode on: manually run Elo "
+            "decay for all players (admin only), same as before. Either "
+            "way, if the server's current month is the season's last "
+            "configured month (see /months), decay is skipped and -c_reg "
+            "runs automatically (no separate confirmation) instead."
+        )
+    )
     @commands.check(is_admin)
     async def decay(self, ctx: commands.Context) -> None:
-        """Apply monthly Elo decay to all players (admin only).
+        """Show time until the next automatic Elo decay, or (with dev mode
+        enabled) manually run Elo decay for all players (admin only).
 
-        Exception: if the server's current month is the last configured
-        month of the season (see /months), Elo decay is skipped entirely -
-        see season_end_notice() in utils/elo_decay.py - and a season-end
-        file export runs instead (Month snapshot + season Overall summary).
+        With dev mode off, -decay is read-only: it reports how long until
+        the next automatic monthly decay run (cogs/admin_elo/decay_auto.py),
+        using Discord's <t:...> timestamp formatting so it renders as a
+        live countdown client-side.
+
+        With dev mode on, -decay keeps its previous behavior, with one
+        addition: at the last configured month of the season (see
+        /months), Elo decay is skipped entirely - see season_end_notice()
+        in utils/elo_decay.py - a season-end file export runs instead
+        (Month snapshot + season Overall summary), and -c_reg now runs
+        automatically right after, with no separate admin confirmation.
         """
+        if not get_dev_mode(ctx.guild.id):
+            run_at = next_scheduled_decay_run()
+            ts = int(run_at.timestamp())
+            await ctx.send(
+                embed=discord.Embed(
+                    title="Next Elo Decay",
+                    description=(
+                        "Dev mode is disabled, `-decay` only reports the "
+                        "countdown here\n\n"
+                        f"Next automatic Elo decay: <t:{ts}:R> (<t:{ts}:F>)."
+                    ),
+                    color=discord.Color.blue(),
+                )
+            )
+            return
+
         pre_season, pre_month = get_season_month(ctx.guild.id)
         max_month = get_max_month(ctx.guild.id)
         is_season_end = max_month is not None and pre_month >= max_month
@@ -212,12 +249,12 @@ class AdminEloDecayCog(AdminEloBaseCog):
             header = (
                 f"Are you sure you want to proceed? React with {YES_EMOJI} to "
                 f"confirm or {NO_EMOJI} to cancel within 5 minutes.\n\n"
-                f"{season_end_notice(pre_season)}\n\n"
+                f"{season_end_notice(pre_season, auto_clear_registrations=True)}\n\n"
                 f"**Season/Month transition:** Season {old_season}, Month {old_month} "
                 f"-> Season {new_season}, Month {new_month}\n\n"
                 f"Instead of Elo decay, the bot will export Season {pre_season}'s "
-                f"leaderboard archive (current Month + season Overall) before "
-                f"moving on."
+                f"leaderboard archive (current Month + season Overall), then run "
+                f"`-c_reg` automatically, before moving on."
             )
             embed = discord.Embed(
                 title="Season End Confirmation",
@@ -352,13 +389,25 @@ class AdminEloDecayCog(AdminEloBaseCog):
             self.bot, ctx.guild.id, new_season, new_month
         )
 
+        # Season end: run -c_reg's exact wipe automatically, no separate
+        # reaction confirmation needed - the -decay confirmation the admin
+        # already gave covers this too, so everything starts fresh for the
+        # next season without an extra manual step.
+        cleared = await clear_all_registrations(self.bot, ctx.guild.id)
+        c_reg_log_line = (
+            f"Ran `-c_reg` automatically: {cleared} registered player(s) and "
+            "their stats permanently deleted."
+            if cleared
+            else "Ran `-c_reg` automatically: no registered players to clear."
+        )
+
         embed.title = "Season Complete - Elo Decay Skipped"
         embed.description = (
-            f"{season_end_notice(old_season)}\n\n"
+            f"{season_end_notice(old_season, auto_clear_registrations=True)}\n\n"
             f"**Season/Month transition:** Season {old_season}, Month {old_month} "
             f"-> Season {new_season}, Month {new_month}\n\n"
             f"**File export log:**\n- {month_log_line}\n- {overall_log_line}\n"
-            f"- {purge_log_line}"
+            f"- {purge_log_line}\n- {c_reg_log_line}"
         )
         embed.color = discord.Color.blue()
 

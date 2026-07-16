@@ -333,8 +333,10 @@ class HelpCog(commands.Cog):
         stats_commands = [
             (
                 "-decay",
-                "Manually run Elo decay for all players (also runs automatically "
-                "every calendar month - see -decay_setup).",
+                "Dev mode off: shows time remaining until the next automatic Elo "
+                "decay. Dev mode on: manually run Elo decay for all players "
+                "(also runs automatically every calendar month - see "
+                "-decay_setup and -devmode).",
             ),
             (
                 "-decay_setup <channel>",

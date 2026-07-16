@@ -282,6 +282,43 @@ def _run_migrations(conn: sqlite3.Connection, cursor: sqlite3.Cursor) -> None:
         """
     )
 
+    # season_max_month_history: records every value /months has ever been
+    # set to on this server, each tagged with the season it took effect
+    # from (the server's current_season at the moment /months was run).
+    # This lets date math (e.g. "Recorded on" in /stats expanded) work out
+    # how many calendar months actually separate two Season/Months even if
+    # an earlier season held a different number of months than the
+    # server's current /months setting - see max_month_for_season() below.
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS season_max_month_history (
+            guild_id INTEGER NOT NULL,
+            effective_season INTEGER NOT NULL,
+            max_month INTEGER NOT NULL,
+            PRIMARY KEY (guild_id, effective_season)
+        )
+        """
+    )
+    # One-time backfill: a server that already had /months set before this
+    # table existed has no history of its own yet. Seed a Season 1 entry
+    # with its current setting so this server's existing seasons are all
+    # still treated consistently (matching prior behavior) until the next
+    # actual /months change starts recording real history.
+    cursor.execute(
+        "SELECT guild_id, max_month FROM settings WHERE max_month IS NOT NULL"
+    )
+    for _guild_id, _max_month in cursor.fetchall():
+        cursor.execute(
+            "SELECT 1 FROM season_max_month_history WHERE guild_id=? LIMIT 1",
+            (_guild_id,),
+        )
+        if cursor.fetchone() is None:
+            cursor.execute(
+                "INSERT INTO season_max_month_history (guild_id, effective_season, max_month) "
+                "VALUES (?, 1, ?)",
+                (_guild_id, _max_month),
+            )
+
     conn.commit()
 
 
@@ -562,8 +599,21 @@ def get_max_month(guild_id: int) -> int | None:
 
 
 def set_max_month(guild_id: int, max_month: int) -> None:
-    """Set the total number of months a season can have on this server."""
+    """Set the total number of months a season can have on this server.
+
+    Also records this change in season_max_month_history, tagged with the
+    server's current season at the time of the call, so a later change
+    (e.g. moving from 3 to 5 months per season starting Season 6) doesn't
+    retroactively make earlier seasons look like they had 5 months too -
+    see max_month_for_season().
+    """
     with db_connection(guild_id) as (conn, cursor):
+        cursor.execute(
+            "SELECT current_season FROM settings WHERE guild_id=?", (guild_id,)
+        )
+        row = cursor.fetchone()
+        current_season = row[0] if row and row[0] is not None else 1
+
         cursor.execute(
             """
             INSERT INTO settings (guild_id, max_month)
@@ -572,7 +622,52 @@ def set_max_month(guild_id: int, max_month: int) -> None:
             """,
             (guild_id, max_month),
         )
+        cursor.execute(
+            """
+            INSERT INTO season_max_month_history (guild_id, effective_season, max_month)
+            VALUES (?, ?, ?)
+            ON CONFLICT(guild_id, effective_season) DO UPDATE SET max_month = excluded.max_month
+            """,
+            (guild_id, current_season, max_month),
+        )
         conn.commit()
+
+
+def get_max_month_history(guild_id: int) -> list[tuple[int, int]]:
+    """Return every recorded /months change for this server, as
+    (effective_season, max_month) pairs sorted by effective_season
+    ascending. The value recorded at a given effective_season applies to
+    every season from then on, until the next recorded entry - see
+    max_month_for_season()."""
+    with db_connection(guild_id) as (conn, cursor):
+        cursor.execute(
+            "SELECT effective_season, max_month FROM season_max_month_history "
+            "WHERE guild_id=? ORDER BY effective_season ASC",
+            (guild_id,),
+        )
+        return cursor.fetchall()
+
+
+def max_month_for_season(guild_id: int, season: int) -> int | None:
+    """Return how many months `season` actually held on this server,
+    based on the recorded /months history rather than assuming every
+    season held the server's current max_month setting.
+
+    Falls back to the earliest recorded setting for any season before the
+    first recorded change, and to the plain current max_month if this
+    server has no history at all (e.g. /months was never run).
+    """
+    history = get_max_month_history(guild_id)
+    if not history:
+        return get_max_month(guild_id)
+
+    applicable = None
+    for effective_season, max_month in history:
+        if effective_season <= season:
+            applicable = max_month
+        else:
+            break
+    return applicable if applicable is not None else history[0][1]
 
 
 def get_season_month(guild_id: int) -> tuple[int, int]:

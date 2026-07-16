@@ -16,6 +16,11 @@ This module now houses AdminEloRegistrationCog with the bulk/registration-
 clearing admin commands referenced in cogs/help.py and elobot.py's logging
 allowlist: c_reg is implemented below. d_reg/did_reg/db_d are still not
 implemented anywhere in the codebase.
+
+clear_all_registrations() is factored out so the -decay command
+(cogs/admin_elo/decay.py) can run the exact same wipe automatically at
+season end, with no separate reaction confirmation, instead of requiring
+the admin to run -c_reg by hand afterwards.
 """
 
 from __future__ import annotations
@@ -34,6 +39,32 @@ from utils.lb_cache import (
 )
 
 from .base import AdminEloBaseCog
+
+
+async def clear_all_registrations(bot: commands.Bot, guild_id: int) -> int:
+    """Delete every registered player for guild_id. players is the parent
+    table; h2h_stats and match_history both declare ON DELETE CASCADE on
+    player_id, and the connection enables PRAGMA foreign_keys=ON, so this
+    single DELETE also wipes each cleared player's head-to-head stats and
+    match history without needing separate statements.
+
+    Returns the number of players that were deleted (0 if there was
+    nothing to clear, in which case no DB write happens).
+    """
+    with db_connection(guild_id) as (_conn, cursor):
+        cursor.execute("SELECT COUNT(*) FROM players")
+        player_count = cursor.fetchone()[0]
+
+    if not player_count:
+        return 0
+
+    with db_connection(guild_id) as (conn, cursor):
+        cursor.execute("DELETE FROM players")
+        conn.commit()
+
+    lb_cache_invalidate(guild_id)
+    lb_cache_rebuild(bot, guild_id)
+    return player_count
 
 
 class AdminEloRegistrationCog(AdminEloBaseCog):
@@ -85,19 +116,10 @@ class AdminEloRegistrationCog(AdminEloBaseCog):
                 "reaction_add", timeout=300.0, check=check
             )
             if str(reaction.emoji) == YES_EMOJI:
-                # players is the parent table; h2h_stats and match_history both
-                # declare ON DELETE CASCADE on player_id, and the connection
-                # enables PRAGMA foreign_keys=ON, so this single DELETE also
-                # wipes each cleared player's head-to-head stats and match
-                # history without needing separate statements.
-                with db_connection(ctx.guild.id) as (conn, cursor):
-                    cursor.execute("DELETE FROM players")
-                    conn.commit()
-                lb_cache_invalidate(ctx.guild.id)
-                lb_cache_rebuild(self.bot, ctx.guild.id)
+                cleared = await clear_all_registrations(self.bot, ctx.guild.id)
                 embed.title = "All Registrations Cleared"
                 embed.description = (
-                    f"{player_count} registered player(s) and their stats have "
+                    f"{cleared} registered player(s) and their stats have "
                     "been permanently deleted."
                 )
                 embed.color = discord.Color.green()

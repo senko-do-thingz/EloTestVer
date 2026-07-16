@@ -1,7 +1,7 @@
 import os
 import re
 import typing
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 
 import discord
 from discord import app_commands
@@ -13,6 +13,8 @@ from db.elo_db import (
     get_db_path,
     get_effective_daily_streak,
     get_max_month,
+    get_max_month_history,
+    get_season_month,
 )
 from utils import (
     format_league_stat_line,
@@ -111,12 +113,16 @@ def _resolve_overall_dir(season_dir: str) -> str | None:
 
 
 def _read_player_stat(
-    dir_path: str, filename: str, player_name_lower: str, *, win_rate: bool = False
+    dir_path: str, filename: str, player_id: str, *, win_rate: bool = False
 ) -> float | int | None:
     """Look up a single player's value in a leaderboard archive file
-    (data.txt / w.txt / l.txt / wr.txt / games.txt), matched by exact name
-    (case insensitive). Returns None if the file or the player's line is
-    missing."""
+    (data.txt / w.txt / l.txt / wr.txt / games.txt), matched by Discord ID -
+    every line written by -get_lb's export already carries the player's
+    Discord ID as its third field (see format_leaderboard_export_line() /
+    parse_leaderboard_line() in utils/lb_archive.py), so matching on that
+    is both exact and immune to display-name changes/collisions that a
+    name match would be vulnerable to. Returns None if the file, the
+    player's line, or that line's Discord ID is missing."""
     file_path = os.path.join(dir_path, filename)
     if not os.path.exists(file_path):
         return None
@@ -129,8 +135,8 @@ def _read_player_stat(
         parsed = parse_leaderboard_line(stripped, win_rate=win_rate)
         if not parsed:
             continue
-        name, value, _ = parsed
-        if name.lower() == player_name_lower:
+        _name, value, discord_id = parsed
+        if discord_id == player_id:
             return value
     return None
 
@@ -191,6 +197,153 @@ def _find_player_name_in_archive(dir_path: str | None, user_id: int) -> str | No
             if discord_id and discord_id == user_id_str:
                 return name
     return None
+
+def _season_length(
+    history: list[tuple[int, int]], fallback_max_month: int, season: int
+) -> int:
+    """How many months `season` held, per the /months change history
+    (each entry is (effective_season, max_month), applying from
+    effective_season onward). Falls back to `fallback_max_month` for any
+    season before the earliest recorded change."""
+    applicable = None
+    for effective_season, max_month in history:
+        if effective_season <= season:
+            applicable = max_month
+        else:
+            break
+    return applicable if applicable is not None else fallback_max_month
+
+
+def _linear_month_index(
+    history: list[tuple[int, int]], fallback_max_month: int, season: int, month: int
+) -> int:
+    """Convert (season, month) into a 1-based count of total calendar
+    months elapsed since Season 1 Month 1, summing each season's actual
+    length from `history` instead of assuming every season is the same
+    length as the server's current /months setting."""
+    total = 0
+    for s in range(1, season):
+        total += _season_length(history, fallback_max_month, s)
+    return total + month
+
+
+def _compute_recorded_date(
+    guild_id: int, season: int, month: int | None
+) -> date | None:
+    """
+    Compute the calendar date a given Season/Month (or Season Overall, when
+    `month` is None) archive was recorded on.
+
+    The automatic monthly rollover (see cogs/admin_elo/decay_auto.py) always
+    exports a month's leaderboard archive on the 1st of the calendar month
+    right after that month was active - i.e. the archive represents that
+    month's last day. A Season's Overall archive is exported at the same
+    time as its last month's archive (season-end rollover), so it's treated
+    as if it were that last month for this calculation.
+
+    Since the server's current Season/Month cursor always matches today's
+    real calendar month, the number of calendar months between "now" and
+    any past Season/Month can be derived purely from season/month
+    arithmetic - no per-archive timestamp needs to be stored. Each
+    season's actual length is looked up from season_max_month_history
+    (see max_month_for_season() in db/elo_db.py) rather than assumed to
+    always equal the server's current /months setting, so an admin
+    changing /months partway through (e.g. Season 1-5 at 3 months each,
+    Season 6+ at 5 months) doesn't skew the dates computed for seasons
+    before that change.
+
+    Returns None if /months was never configured, or if the requested
+    Season/Month is the current (not yet archived) one or in the future.
+    """
+    max_month = get_max_month(guild_id)
+    if not max_month:
+        return None
+
+    history = get_max_month_history(guild_id)
+    current_season, current_month = get_season_month(guild_id)
+    current_index = _linear_month_index(
+        history, max_month, current_season, current_month
+    )
+
+    target_month = (
+        month if month is not None else _season_length(history, max_month, season)
+    )
+    target_index = _linear_month_index(history, max_month, season, target_month)
+
+    months_back = current_index - target_index
+    if months_back <= 0:
+        return None
+
+    today = datetime.now(timezone.utc).date()
+
+    # Walk back `months_back` calendar months from today, then take the
+    # last day of that month - the day the archive was recorded on.
+    zero_based_month = today.month - 1 - months_back
+    year = today.year + zero_based_month // 12
+    month_num = zero_based_month % 12 + 1
+
+    if month_num == 12:
+        next_year, next_month_num = year + 1, 1
+    else:
+        next_year, next_month_num = year, month_num + 1
+
+    return date(next_year, next_month_num, 1) - timedelta(days=1)
+
+
+def _closest_dir_to_current(
+    guild_id: int,
+    resolved_entries: list,
+    dir_season_month: dict,
+) -> str:
+    """
+    Among every directory resolved for a "/stats expanded" request, return
+    the one whose Season/Month (Overall counts as that season's last month)
+    is closest to the server's current Season/Month cursor.
+
+    Used as the representative directory for the player-name fallback when
+    the command's invoker isn't currently registered: rather than always
+    using the first requested Season/Month, this picks whichever requested
+    period is nearest to "now" - closer in time to the current season means
+    a more likely-accurate/up-to-date recorded name.
+
+    Falls back to the very first resolved directory if /months was never
+    configured for this server (so relative distance can't be computed).
+    """
+    all_dirs = [d for _, dirs, _, _, _ in resolved_entries for d in dirs]
+
+    max_month = get_max_month(guild_id)
+    if not max_month:
+        return all_dirs[0]
+
+    history = get_max_month_history(guild_id)
+    current_season, current_month = get_season_month(guild_id)
+    current_index = _linear_month_index(
+        history, max_month, current_season, current_month
+    )
+
+    best_dir = all_dirs[0]
+    best_distance = None
+    for dir_path in all_dirs:
+        season, month = dir_season_month[dir_path]
+        target_month = (
+            month if month is not None else _season_length(history, max_month, season)
+        )
+        target_index = _linear_month_index(history, max_month, season, target_month)
+        distance = abs(current_index - target_index)
+        if best_distance is None or distance < best_distance:
+            best_distance = distance
+            best_dir = dir_path
+
+    return best_dir
+
+
+def _format_date_mmddyyyy(recorded: date) -> str:
+    return f"{recorded.month:02d}/{recorded.day:02d}/{recorded.year:04d}"
+
+
+def _format_recorded_on(recorded: date) -> str:
+    return f"Recorded on {_format_date_mmddyyyy(recorded)}"
+
 
 STATS_ELO_LEADERBOARD_NOTE = (
     "*Play at least one set to be ranked on the Elo leaderboard.*"
@@ -597,42 +750,21 @@ class StatsCog(commands.GroupCog, name="stats", description="View player statist
             )
             return
 
-        with db_connection(guild_id) as (conn, cursor):
-            cursor.execute(
-                "SELECT name FROM players WHERE id = ?", (str(ctx.author.id),)
-            )
-            row = cursor.fetchone()
-
-        if row:
-            player_name = row[0]
-        else:
-            # Not currently registered: fall back to the name recorded in
-            # the archive (matched by Discord ID) for the first season/month
-            # mentioned in the command, so past players still resolve.
-            first_season, first_months = groups[0]
-            first_season_dir = _resolve_season_dir(base, first_season)
-            lookup_dir = None
-            if first_season_dir is not None:
-                lookup_dir = (
-                    _resolve_month_dir(first_season_dir, first_months[0])
-                    if first_months
-                    else _resolve_overall_dir(first_season_dir)
-                )
-            player_name = _find_player_name_in_archive(lookup_dir, ctx.author.id)
-
-            if not player_name:
-                await ctx.send(
-                    embed=discord.Embed(
-                        title="Player Not Registered",
-                        description="You are not registered. Use `-register <name>` to sign up!",
-                        color=discord.Color.red(),
-                    )
-                )
-                return
-
-        player_name_lower = player_name.lower()
+        player_id_str = str(ctx.author.id)
 
         max_month = get_max_month(guild_id)
+
+        # Whether ANY group in this request specified explicit months (as
+        # opposed to just a bare season, e.g. "s7"). This decides how a
+        # bare-season group is resolved below:
+        # - Every group is a bare season (e.g. "/stats expanded s7 s8")
+        #   -> each bare season uses its Overall folder.
+        # - At least one group has explicit months (e.g.
+        #   "/stats expanded s7 s8m1") -> a bare season is expanded into
+        #   all of that season's individual months instead (e.g. "s7"
+        #   becomes s7m1, s7m2, s7m3), so every entry in the average comes
+        #   from the same granularity of file.
+        has_explicit_months = any(months for _season, months in groups)
 
         # Resolve every group into either a single "Overall" directory, or
         # one directory per requested month. `season` and `months` (the
@@ -643,6 +775,11 @@ class StatsCog(commands.GroupCog, name="stats", description="View player statist
         resolved_entries: list[
             tuple[str, list[str], bool, int, list[int] | None]
         ] = []
+        # Maps each resolved directory path back to the (season, month)
+        # it represents (month is None for an Overall directory), used to
+        # compute the "Recorded on" footer without re-deriving it from the
+        # directory path/label.
+        dir_season_month: dict[str, tuple[int, int | None]] = {}
         for season, months in groups:
             season_dir = _resolve_season_dir(base, season)
             if season_dir is None:
@@ -655,12 +792,24 @@ class StatsCog(commands.GroupCog, name="stats", description="View player statist
                 )
                 return
 
-            # No months given for this season -> use the Overall folder.
+            was_bare_season = not months
+            if was_bare_season and has_explicit_months and max_month:
+                # Bare season mixed with explicit-month entries elsewhere
+                # in the request - expand to every individual month of
+                # this season instead of using Overall.
+                months = list(range(1, max_month + 1))
+
+            # No months given for this season (and nothing to expand it
+            # into) -> use the Overall folder.
             use_overall = not months
             # Months given cover the server's entire configured month range
-            # -> also use Overall instead of averaging each month.
+            # -> also use Overall instead of averaging each month. This
+            # only applies to months the user explicitly typed - a bare
+            # season expanded above stays as individual months so it
+            # matches the granularity of the rest of the request.
             if (
                 not use_overall
+                and not was_bare_season
                 and max_month is not None
                 and sorted(set(months)) == list(range(1, max_month + 1))
             ):
@@ -682,6 +831,7 @@ class StatsCog(commands.GroupCog, name="stats", description="View player statist
                 resolved_entries.append(
                     (f"S{season}Overall", [overall_dir], True, season, None)
                 )
+                dir_season_month[overall_dir] = (season, None)
                 continue
 
             month_dirs = []
@@ -700,9 +850,55 @@ class StatsCog(commands.GroupCog, name="stats", description="View player statist
                     )
                     return
                 month_dirs.append(month_dir)
+                dir_season_month[month_dir] = (season, month)
 
             label = f"S{season}" + "".join(f"M{m}" for m in months)
             resolved_entries.append((label, month_dirs, False, season, months))
+
+        # Resolve the display name to show for this player.
+        #
+        # - A single Season/Month (or Overall) view shows the name as it
+        #   was recorded in that stat's own archive file, so historical
+        #   views always reflect the name the player had at that time.
+        # - Multiple combined Season/Month entries show the player's
+        #   current registered name instead, since the combined view isn't
+        #   tied to any single archive snapshot.
+        # - If the player isn't currently registered, the archive name from
+        #   whichever requested Season/Month is closest to the server's
+        #   current Season/Month is used as a stand-in, e.g. if the current
+        #   Season/Month is close to Season 7 Month 1, "s6m1m2 s7m1m3" uses
+        #   the name recorded for Season 7, Month 1.
+        with db_connection(guild_id) as (conn, cursor):
+            cursor.execute("SELECT name FROM players WHERE id = ?", (player_id_str,))
+            row = cursor.fetchone()
+        registered_name = row[0] if row else None
+
+        is_single_entry = (
+            len(resolved_entries) == 1 and len(resolved_entries[0][1]) == 1
+        )
+
+        if registered_name is None:
+            closest_dir = _closest_dir_to_current(
+                guild_id, resolved_entries, dir_season_month
+            )
+            player_name = _find_player_name_in_archive(closest_dir, ctx.author.id)
+            if not player_name:
+                await ctx.send(
+                    embed=discord.Embed(
+                        title="Player Not Registered",
+                        description="You are not registered. Use `-register <name>` to sign up!",
+                        color=discord.Color.red(),
+                    )
+                )
+                return
+        elif is_single_entry:
+            single_dir = resolved_entries[0][1][0]
+            player_name = (
+                _find_player_name_in_archive(single_dir, ctx.author.id)
+                or registered_name
+            )
+        else:
+            player_name = registered_name
 
         # A single season resolving to exactly one directory - either one
         # exact month, or the season collapsing to Overall - shows the full
@@ -711,16 +907,16 @@ class StatsCog(commands.GroupCog, name="stats", description="View player statist
             label, dirs, is_overall, _, _ = resolved_entries[0]
             dir_path = dirs[0]
 
-            elo = _read_player_stat(dir_path, "data.txt", player_name_lower)
-            wins = _read_player_stat(dir_path, "w.txt", player_name_lower)
-            losses = _read_player_stat(dir_path, "l.txt", player_name_lower)
+            elo = _read_player_stat(dir_path, "data.txt", player_id_str)
+            wins = _read_player_stat(dir_path, "w.txt", player_id_str)
+            losses = _read_player_stat(dir_path, "l.txt", player_id_str)
             win_rate = _read_player_stat(
-                dir_path, "wr.txt", player_name_lower, win_rate=True
+                dir_path, "wr.txt", player_id_str, win_rate=True
             )
             games = (
                 None
                 if is_overall
-                else _read_player_stat(dir_path, "games.txt", player_name_lower)
+                else _read_player_stat(dir_path, "games.txt", player_id_str)
             )
 
             if (
@@ -782,6 +978,10 @@ class StatsCog(commands.GroupCog, name="stats", description="View player statist
             body_lines.append(win_rate_line)
 
             embed = discord.Embed(description="\n".join(body_lines), color=ACCENT_COLOR)
+            entry_season, entry_month = dir_season_month[dir_path]
+            recorded = _compute_recorded_date(guild_id, entry_season, entry_month)
+            if recorded is not None:
+                embed.set_footer(text=_format_recorded_on(recorded))
             avatar_url = await self._get_display_avatar_url(ctx, ctx.author, ctx.author.id)
             if avatar_url:
                 embed.set_thumbnail(url=avatar_url)
@@ -809,16 +1009,16 @@ class StatsCog(commands.GroupCog, name="stats", description="View player statist
 
         for dir_path in all_dirs:
             elo = _read_player_stat(
-                dir_path, EXPANDED_FILE_MAP["elo"], player_name_lower
+                dir_path, EXPANDED_FILE_MAP["elo"], player_id_str
             )
             wins = _read_player_stat(
-                dir_path, EXPANDED_FILE_MAP["wins"], player_name_lower
+                dir_path, EXPANDED_FILE_MAP["wins"], player_id_str
             )
             losses = _read_player_stat(
-                dir_path, EXPANDED_FILE_MAP["losses"], player_name_lower
+                dir_path, EXPANDED_FILE_MAP["losses"], player_id_str
             )
             win_rate = _read_player_stat(
-                dir_path, EXPANDED_FILE_MAP["win_rate"], player_name_lower, win_rate=True
+                dir_path, EXPANDED_FILE_MAP["win_rate"], player_id_str, win_rate=True
             )
 
             if elo is not None:
@@ -895,7 +1095,7 @@ class StatsCog(commands.GroupCog, name="stats", description="View player statist
 
         body = (
             f"## Player Statistics\n"
-            f"**{player_name} - {suffix}**\n"
+            f"**{player_name}**\n"
             f"{elo_line}\n"
             f"🏆 Wins: {wins_total}\n"
             f"💀 Losses: {losses_total}\n"
@@ -903,6 +1103,26 @@ class StatsCog(commands.GroupCog, name="stats", description="View player statist
         )
 
         embed = discord.Embed(description=body, color=ACCENT_COLOR)
+        recorded_dates = sorted(
+            {
+                d
+                for dir_path in all_dirs
+                for d in [
+                    _compute_recorded_date(guild_id, *dir_season_month[dir_path])
+                ]
+                if d is not None
+            }
+        )
+        footer_lines = [suffix]
+        if recorded_dates:
+            if len(recorded_dates) == 1:
+                footer_lines.append(_format_recorded_on(recorded_dates[0]))
+            else:
+                footer_lines.append(
+                    f"Recorded on {_format_date_mmddyyyy(recorded_dates[0])} "
+                    f"- {_format_date_mmddyyyy(recorded_dates[-1])}"
+                )
+        embed.set_footer(text="\n".join(footer_lines))
         avatar_url = await self._get_display_avatar_url(ctx, ctx.author, ctx.author.id)
         if avatar_url:
             embed.set_thumbnail(url=avatar_url)

@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import io
 import os
+import re
 import zipfile
 
 from db.elo_db import db_connection
@@ -97,21 +98,53 @@ def write_leaderboard_files(dest_dir: str, categories: dict[str, str]) -> None:
             f.write(content)
 
 
+def _month_dir_sort_key(dirname: str) -> tuple[int, str]:
+    """Sort "Month <n>" directories numerically (Month 2 before Month 10),
+    with anything unrecognized pushed to the end. Used so aggregation
+    below processes months in chronological order, meaning a player's
+    most-recently-seen display name is the one carried into the Overall
+    archive."""
+    match = re.match(r"month\s+(\d+)", dirname, re.IGNORECASE)
+    return (int(match.group(1)), dirname) if match else (10**9, dirname)
+
+
 def aggregate_season_categories(season_path: str) -> dict[str, str]:
     """Sum every month archived under season_path (e.g. lb/<id>/Season 6/)
     into total elo/wins/losses/win-rate category files, the same way
     -sum_lb has always done it. Returns an empty dict if no month data is
     found or none of it parses.
+
+    Each player is summed by Discord ID (the stable identity every other
+    archive file is matched on - see parse_leaderboard_line() /
+    _read_player_stat() in cogs/stats.py), not by display name, so a name
+    change between months doesn't split one player into two totals and
+    the resulting Overall file still carries a Discord ID for each line.
+    Lines from very old archives written before Discord IDs were included
+    fall back to being keyed/summed by name instead, since there's no
+    stable ID to sum them against, and are written back out without an ID
+    the same way they were read.
     """
     months = [
         d
         for d in os.listdir(season_path)
         if os.path.isdir(os.path.join(season_path, d)) and d.lower() != "overall"
     ]
+    months.sort(key=_month_dir_sort_key)
 
-    player_elo: dict[str, int] = {}
-    player_wins: dict[str, int] = {}
-    player_losses: dict[str, int] = {}
+    # category filename -> { key: [name, discord_id, total] }, where key
+    # is the Discord ID when known, else a name-based fallback key.
+    player_elo: dict[str, list] = {}
+    player_wins: dict[str, list] = {}
+    player_losses: dict[str, list] = {}
+
+    def _accumulate(target: dict[str, list], name: str, value: int, discord_id):
+        key = discord_id or f"name:{name}"
+        entry = target.get(key)
+        if entry is None:
+            target[key] = [name, discord_id, value]
+        else:
+            entry[0] = name  # keep the most-recently-seen display name
+            entry[2] += value
 
     for month in months:
         month_path = os.path.join(season_path, month)
@@ -135,50 +168,64 @@ def aggregate_season_categories(season_path: str) -> dict[str, str]:
                     continue
                 parsed = parse_leaderboard_line(stripped)
                 if parsed:
-                    name, value, _ = parsed
-                    target[name] = target.get(name, 0) + value
+                    name, value, discord_id = parsed
+                    _accumulate(target, name, value, discord_id)
 
     if not player_elo and not player_wins and not player_losses:
         return {}
+
+    def _format_line(name: str, value, discord_id) -> str:
+        return (
+            format_leaderboard_export_line(name, value, discord_id)
+            if discord_id
+            else f"{name} {value}"
+        )
 
     categories: dict[str, str] = {}
 
     if player_elo:
         elo_lines = [
-            f"{name} {elo}"
-            for name, elo in sorted(player_elo.items(), key=lambda x: x[1], reverse=True)
+            _format_line(name, elo, discord_id)
+            for name, discord_id, elo in sorted(
+                player_elo.values(), key=lambda x: x[2], reverse=True
+            )
         ]
         categories["data.txt"] = "Elo Leaderboard\n\n" + "\n".join(elo_lines)
 
     if player_wins:
         wins_lines = [
-            f"{name} {wins}"
-            for name, wins in sorted(player_wins.items(), key=lambda x: x[1], reverse=True)
+            _format_line(name, wins, discord_id)
+            for name, discord_id, wins in sorted(
+                player_wins.values(), key=lambda x: x[2], reverse=True
+            )
         ]
         categories["w.txt"] = "Wins Leaderboard\n\n" + "\n".join(wins_lines)
 
     if player_losses:
         losses_lines = [
-            f"{name} {losses}"
-            for name, losses in sorted(player_losses.items(), key=lambda x: x[1], reverse=True)
+            _format_line(name, losses, discord_id)
+            for name, discord_id, losses in sorted(
+                player_losses.values(), key=lambda x: x[2], reverse=True
+            )
         ]
         categories["l.txt"] = "Losses Leaderboard\n\n" + "\n".join(losses_lines)
 
-    all_player_names = set(player_wins.keys()) | set(player_losses.keys())
-    if all_player_names:
-        wr_players = sorted(
-            [
-                (
-                    name,
-                    calculate_win_rate(player_wins.get(name, 0), player_losses.get(name, 0)),
-                )
-                for name in all_player_names
-            ],
-            key=lambda x: x[1],
-            reverse=True,
-        )
+    # Win Rate: combine wins/losses keyed the same way (Discord ID when
+    # known, else name) so wr.txt also carries IDs and stays matchable by
+    # _read_player_stat.
+    all_keys = set(player_wins.keys()) | set(player_losses.keys())
+    if all_keys:
+        wr_entries = []
+        for key in all_keys:
+            w_name, w_id, wins = player_wins.get(key, (None, None, 0))
+            l_name, l_id, losses = player_losses.get(key, (None, None, 0))
+            name = w_name or l_name
+            discord_id = w_id or l_id
+            wr_entries.append((name, discord_id, calculate_win_rate(wins, losses)))
+        wr_entries.sort(key=lambda x: x[2], reverse=True)
         categories["wr.txt"] = "Win Rate Leaderboard\n\n" + "\n".join(
-            f"{name} {wr:.2f}" for name, wr in wr_players
+            _format_line(name, f"{wr:.2f}", discord_id)
+            for name, discord_id, wr in wr_entries
         )
 
     return categories

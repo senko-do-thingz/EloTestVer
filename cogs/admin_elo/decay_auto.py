@@ -42,6 +42,7 @@ from db.elo_db import (
 )
 from utils import sync_league_roles
 from utils.elo_decay import (
+    DECAY_AUTO_RUN_TIME_UTC,
     announce_league_changes,
     apply_elo_decay_in_transaction,
     build_decay_summary_lines,
@@ -60,8 +61,10 @@ from utils.lb_cache import (
 from utils.logger import bot_log
 
 # A few minutes after daily_streak_refresh.py's midnight task, so both never
-# race for the same guild databases.
-_MONTHLY_CHECK_UTC = dt.time(hour=0, minute=10, second=0, tzinfo=dt.timezone.utc)
+# race for the same guild databases. Sourced from utils/elo_decay.py so this
+# schedule and -decay's "time remaining" preview (dev mode off) never drift
+# apart.
+_MONTHLY_CHECK_UTC = DECAY_AUTO_RUN_TIME_UTC
 
 
 async def run_monthly_decay_for_guild(bot: commands.Bot, guild_id: int) -> None:
