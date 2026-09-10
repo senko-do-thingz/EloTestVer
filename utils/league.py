@@ -229,19 +229,18 @@ async def _sync_member_role(
     discovered_role_ids: set[int],
     *,
     silent: bool = False,
-    league_changes_out: list[tuple[str, str, str]] | None = None,
+    league_changes_file: str | None = None,
 ) -> tuple[int, list[tuple[int, int]], list[tuple[int, int]]]:
     """Sync role for a single member. Returns (changed, added_log, removed_log).
 
     Args:
         silent: If True, skip sending individual league-change notifications to
                 announce channels. Used when called from -decay to avoid spam.
-        league_changes_out: If provided (a list), every time a league change
-                (promote/demote) is detected, a tuple
-                (member_mention, old_league_name, new_league_name) is appended
-                to this list instead, regardless of `silent`. Used to batch all
-                league changes into a single message (e.g. after -decay)
-                instead of sending one message per member.
+        league_changes_file: If provided (a file path), every time a league
+                change (promote/demote) is detected, a line is appended to this
+                file with the member's bold display name and the league
+                transition. After all members are processed the caller reads
+                this file and sends a single consolidated message.
     """
     role_by_id = {r.id: r for r in guild.roles}
 
@@ -303,10 +302,11 @@ async def _sync_member_role(
             old_name = role_id_to_name.get(old_role.id, old_role.name)
             new_name = role_id_to_name.get(new_role.id, new_role.name)
 
-            if league_changes_out is not None:
-                # Batch the change so the caller can send a single consolidated
-                # message, instead of one message per member.
-                league_changes_out.append((member.mention, old_name, new_name))
+            if league_changes_file is not None:
+                # Write the change to the temp file so the caller can send a
+                # single consolidated message after all members are processed.
+                with open(league_changes_file, "a", encoding="utf-8") as f:
+                    f.write(f"**{member.display_name}**: {old_name} -> {new_name}\n")
             elif not silent and announce_channels:
                 change_word = "promoted" if role_rank.get(new_role.id, 0) > role_rank.get(old_role.id, 0) else "demoted"
                 msg = f"{member.mention} has been {change_word} from **{old_name}** to **{new_name}**."
@@ -327,7 +327,7 @@ async def sync_league_roles(
     player_ids: list[int] | None = None,
     *,
     silent: bool = False,
-    league_changes_out: list[tuple[str, str, str]] | None = None,
+    league_changes_file: str | None = None,
 ) -> tuple[int, list[str], list[tuple[int, int]], list[tuple[int, int]]]:
     """
     Assign/remove league roles based on Elo.
@@ -340,11 +340,11 @@ async def sync_league_roles(
         silent: If True, skip sending individual league-change notifications
                 to announce channels. Used when called from -decay to avoid
                 spamming the bot.
-        league_changes_out: If provided (a list), every league change detected
-                during this sync is appended to the list as a tuple
-                (member_mention, old_league_name, new_league_name) instead of
-                sending individual messages to announce channels. The caller
-                can then use this list to build a single consolidated message.
+        league_changes_file: If provided (a file path), every league change
+                detected during this sync is appended to the file as a line
+                with the member's bold display name and league transition.
+                After sync completes, the caller reads this file and sends
+                a single consolidated message.
 
     Returns:
         (updated_count, missing_role_names, added_log, removed_log)
@@ -400,7 +400,7 @@ async def sync_league_roles(
             effective_leagues, league_role_ids, role_id_to_name, role_rank,
             announce_channels, discovered_role_ids,
             silent=silent,
-            league_changes_out=league_changes_out,
+            league_changes_file=league_changes_file,
         )
 
     if is_full_sync:

@@ -156,7 +156,7 @@ class TestH2HStats:
 
 
 # ---------------------------------------------------------------------------
-# Migration: legacy against TEXT → h2h_stats
+# Migration: legacy against TEXT -> h2h_stats
 # ---------------------------------------------------------------------------
 
 class TestMigrateLegacyAgainst:
@@ -190,7 +190,7 @@ class TestEloDbSettings:
         from db.elo_db import get_language
         guild_id, _ = guild_db
         lang = get_language(guild_id)
-        # No settings row yet → default 'en'
+        # No settings row yet -> default 'en'
         assert lang == "en"
 
     def test_dev_mode_default_false(self, guild_db):

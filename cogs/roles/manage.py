@@ -67,7 +67,7 @@ class RolesManageCog(RolesBaseCog):
                     "- Use `h` as `maximum_elo` to mean **Higher** (from `minimum_elo` and above)\n\n"
                     "- `discovered` (optional): `1` = discovered, `0` = undiscovered (default: `0`)\n\n"
                     "League name:\n"
-                    "- If it has **2+ characters**, `_` represents a space. Example: `Diamond_League` → `Diamond League`\n\n"
+                    "- If it has **2+ characters**, `_` represents a space. Example: `Diamond_League` -> `Diamond League`\n\n"
                     "To cancel this setup, use `-lcancel`.\n\n"
                     f"Example:\n```\n{example}\n```"
                 ),
@@ -191,7 +191,7 @@ class RolesManageCog(RolesBaseCog):
                 if low <= p_high:
                     overlaps.append(f"`{p_name}` overlaps `{row[0]}`")
                 elif low > p_high + 1:
-                    gaps.append(f"`{p_name}` → `{row[0]}` (Elo {p_high + 1}–{low - 1} is unassigned)")
+                    gaps.append(f"`{p_name}` -> `{row[0]}` (Elo {p_high + 1}–{low - 1} is unassigned)")
             prev = (low, high, row[0])
 
         if overlaps:

@@ -37,7 +37,7 @@ class RegistrationCog(commands.Cog):
     )
     @app_commands.describe(name="Your registered display name")
     @app_commands.guild_only()
-    async def register(self, ctx: commands.Context, name: str = None):
+    async def register(self, ctx: commands.Context, *, name: str = None):
         prompt: discord.Message | None = None
         if name is None:
             prompt = await ctx.send(embed=discord.Embed(
@@ -125,7 +125,7 @@ class RegistrationCog(commands.Cog):
         help="Register another player (admin only).",
     )
     @commands.check(is_admin)
-    async def register_o(self, ctx: commands.Context, member: discord.Member, name: str = None):
+    async def register_o(self, ctx: commands.Context, member: discord.Member, *, name: str = None):
         if name is None:
             await ctx.send(embed=discord.Embed(
                 title="Registration Failed",
@@ -182,7 +182,7 @@ class RegistrationCog(commands.Cog):
         help="Register a player by Discord ID (admin only).",
     )
     @commands.check(is_admin)
-    async def register_oid(self, ctx: commands.Context, discord_id: str, name: str = None):
+    async def register_oid(self, ctx: commands.Context, discord_id: str, *, name: str = None):
         if name is None:
             await ctx.send(embed=discord.Embed(
                 title="Registration Failed",
@@ -375,7 +375,7 @@ class RegistrationCog(commands.Cog):
     )
     @app_commands.describe(new_name="Your new registered display name")
     @app_commands.guild_only()
-    async def rename(self, ctx: commands.Context, new_name: str = None):
+    async def rename(self, ctx: commands.Context, *, new_name: str = None):
         if new_name is None:
             await ctx.send(embed=discord.Embed(
                 title="Rename Failed",
@@ -433,7 +433,7 @@ class RegistrationCog(commands.Cog):
         help="Rename another player (admin only, no cooldown).",
     )
     @commands.check(is_admin)
-    async def rename_o(self, ctx: commands.Context, member: discord.Member, new_name: str = None):
+    async def rename_o(self, ctx: commands.Context, member: discord.Member, *, new_name: str = None):
         if new_name is None:
             await ctx.send(embed=discord.Embed(
                 title="Rename Failed",
@@ -495,7 +495,7 @@ class RegistrationCog(commands.Cog):
         help="Rename a player by Discord ID (admin only, no cooldown).",
     )
     @commands.check(is_admin)
-    async def rename_oid(self, ctx: commands.Context, discord_id: str, new_name: str = None):
+    async def rename_oid(self, ctx: commands.Context, discord_id: str, *, new_name: str = None):
         if new_name is None:
             await ctx.send(embed=discord.Embed(
                 title="Rename Failed",

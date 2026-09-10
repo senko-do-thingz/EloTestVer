@@ -75,7 +75,7 @@ class TestRenderLeaderboardImage:
         from utils.rendering import render_leaderboard_image
         buf = render_leaderboard_image(SAMPLE_ENTRIES_SIMPLE, title="Test LB")
         img = _open_buf(buf)
-        # Default width=580, SCALE=2 → expected pixel width 1160
+        # Default width=580, SCALE=2 -> expected pixel width 1160
         assert img.size[0] == 1160
 
     def test_custom_width(self):
@@ -182,7 +182,7 @@ class TestFontCaching:
         from utils.rendering import _load_latin_font
         _load_latin_font.cache_clear()
         _load_latin_font(30)
-        _load_latin_font(30)  # second call → cache hit
+        _load_latin_font(30)  # second call -> cache hit
         info = _load_latin_font.cache_info()
         assert info.hits >= 1
 

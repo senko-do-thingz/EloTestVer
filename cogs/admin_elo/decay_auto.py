@@ -29,6 +29,7 @@ helpers used here and by the manual -decay command):
 from __future__ import annotations
 
 import datetime as dt
+import os
 
 import discord
 from discord.ext import commands, tasks
@@ -137,11 +138,19 @@ async def run_monthly_decay_for_guild(bot: commands.Bot, guild_id: int) -> None:
 
     lb_cache_invalidate(guild_id)
 
-    league_changes: list[tuple[str, str, str]] = []
+    import tempfile as _tempfile
+    tmp_fd, league_changes_file = _tempfile.mkstemp(suffix=".txt", prefix="league_changes_")
+    os.close(tmp_fd)
     if guild is not None:
         lb_cache_rebuild(bot, guild_id)
-        await sync_league_roles(guild, silent=True, league_changes_out=league_changes)
-        await announce_league_changes(guild, league_changes)
+        await sync_league_roles(guild, silent=True, league_changes_file=league_changes_file)
+        await announce_league_changes(guild, league_changes_file)
+    else:
+        # No guild available - clean up the unused temp file
+        try:
+            os.remove(league_changes_file)
+        except OSError:
+            pass
 
     purge_log_line = await purge_old_match_history(bot, guild_id, new_season, new_month)
 

@@ -227,7 +227,7 @@ class RolesViewCog(RolesBaseCog):
             name="Required setup",
             value=(
                 "- To start using this feature, grant the bot permission by doing: "
-                "`Server Settings` → `Roles` → `Elo Bot` → search and enable `Manage Roles`.\n"
+                "`Server Settings` -> `Roles` -> `Elo Bot` -> search and enable `Manage Roles`.\n"
                 "- Then create the server roles for your leagues (e.g. `Diamond`, `Gold`, etc.)."
             ),
             inline=False,

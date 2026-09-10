@@ -456,7 +456,7 @@ class LeaderboardView(discord.ui.LayoutView):
                 self.db_guild_id, self.category, self.page, self.target_user_id,
             )
 
-        # --- Cache miss or user in page → render fresh ---
+        # --- Cache miss or user in page -> render fresh ---
         entries = []
         for i, (pid, name, stat) in enumerate(page_players):
             rank = start + i + 1

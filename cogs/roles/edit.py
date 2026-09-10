@@ -118,7 +118,7 @@ class RolesEditCog(RolesBaseCog):
                     "- Use `h` as `maximum_elo` to mean **Higher** (from `minimum_elo` and above)\n"
                     "- `discovered` (optional): `1` = discovered, `0` = undiscovered (default: `0`)\n\n"
                     "League name:\n"
-                    "- If it has **2+ characters**, `_` represents a space. Example: `Diamond_League` → `Diamond League`\n\n"
+                    "- If it has **2+ characters**, `_` represents a space. Example: `Diamond_League` -> `Diamond League`\n\n"
                     f"Example:\n```\n{example}\n```"
                 ),
                 color=discord.Color.orange(),
@@ -239,7 +239,7 @@ class RolesEditCog(RolesBaseCog):
                 if low <= p_high:
                     overlaps.append(f"`{p_name}` overlaps `{row[0]}`")
                 elif low > p_high + 1:
-                    gaps.append(f"`{p_name}` → `{row[0]}` (Elo {p_high + 1}–{low - 1} is unassigned)")
+                    gaps.append(f"`{p_name}` -> `{row[0]}` (Elo {p_high + 1}–{low - 1} is unassigned)")
             prev = (low, high, row[0])
 
         if overlaps:
@@ -417,8 +417,8 @@ class RolesEditCog(RolesBaseCog):
                 embed=discord.Embed(
                     title="Boundary Applied",
                     description=(
-                        f"{sel_display} (max) → **{int(new_max)}**\n"
-                        f"{n_display} (min) → **{n_new_min}**"
+                        f"{sel_display} (max) -> **{int(new_max)}**\n"
+                        f"{n_display} (min) -> **{n_new_min}**"
                     ),
                     color=discord.Color.blurple(),
                 )
@@ -474,8 +474,8 @@ class RolesEditCog(RolesBaseCog):
                 embed=discord.Embed(
                     title="Boundary Applied",
                     description=(
-                        f"{p_display} (max) → **{p_new_max}**\n"
-                        f"{sel_display} (min) → **{sel_new_min}**"
+                        f"{p_display} (max) -> **{p_new_max}**\n"
+                        f"{sel_display} (min) -> **{sel_new_min}**"
                     ),
                     color=discord.Color.blurple(),
                 )
@@ -611,8 +611,8 @@ class RolesEditCog(RolesBaseCog):
                 embed=discord.Embed(
                     title="Boundary Applied",
                     description=(
-                        f"{p_display} (max) → **{p_new_max}**\n"
-                        f"{sel_display} (min) → **{sel_new_min}**"
+                        f"{p_display} (max) -> **{p_new_max}**\n"
+                        f"{sel_display} (min) -> **{sel_new_min}**"
                     ),
                     color=discord.Color.blurple(),
                 )
@@ -671,8 +671,8 @@ class RolesEditCog(RolesBaseCog):
                 embed=discord.Embed(
                     title="Boundary Applied",
                     description=(
-                        f"{sel_display} (max) → **{sel_new_max}**\n"
-                        f"{n_display} (min) → **{n_new_min}**"
+                        f"{sel_display} (max) -> **{sel_new_max}**\n"
+                        f"{n_display} (min) -> **{n_new_min}**"
                     ),
                     color=discord.Color.blurple(),
                 )
@@ -759,9 +759,9 @@ class RolesEditCog(RolesBaseCog):
                 embed=discord.Embed(
                     title="Boundary Applied",
                     description=(
-                        f"{p_display} (max) → **{p_new_max}**\n"
-                        f"{sel_display} (min,max) → **{sel_new_min} - {sel_new_max}**\n"
-                        f"{n_display} (min) → **{n_new_min}**"
+                        f"{p_display} (max) -> **{p_new_max}**\n"
+                        f"{sel_display} (min,max) -> **{sel_new_min} - {sel_new_max}**\n"
+                        f"{n_display} (min) -> **{n_new_min}**"
                     ),
                     color=discord.Color.blurple(),
                 )

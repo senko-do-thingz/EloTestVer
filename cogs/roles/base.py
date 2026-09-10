@@ -301,7 +301,7 @@ class RolesBaseCog(commands.Cog):
         lines_added: list[str] = []
         if added:
             for uid, rid in sorted(added, key=lambda x: (x[0], x[1])):
-                lines_added.append(f"<@{uid}> → <@&{rid}>")
+                lines_added.append(f"<@{uid}> -> <@&{rid}>")
 
         lines_removed: list[str] = []
         if removed:

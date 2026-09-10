@@ -601,9 +601,9 @@ class StatsCog(commands.GroupCog, name="stats", description="View player statist
 
         Always returns a ``list[tuple]`` where each tuple is
         ``(id, name, games_won, games_lost, elo, games_played_this_month, win_streak)``:
-        - Empty list  → no match found
-        - 1-item list → exact match (or single partial match)
-        - N-item list → multiple partial matches (callers show disambiguation)
+        - Empty list  -> no match found
+        - 1-item list -> exact match (or single partial match)
+        - N-item list -> multiple partial matches (callers show disambiguation)
 
         Callers can uniformly check ``len(result)`` without needing
         ``isinstance`` guards.
@@ -800,20 +800,11 @@ class StatsCog(commands.GroupCog, name="stats", description="View player statist
                 months = list(range(1, max_month + 1))
 
             # No months given for this season (and nothing to expand it
-            # into) -> use the Overall folder.
+            # into) -> use the Overall folder. Overall is only ever used
+            # for a bare season - explicitly typed months always average
+            # those months' individual files, even if they happen to
+            # cover the server's entire configured month range.
             use_overall = not months
-            # Months given cover the server's entire configured month range
-            # -> also use Overall instead of averaging each month. This
-            # only applies to months the user explicitly typed - a bare
-            # season expanded above stays as individual months so it
-            # matches the granularity of the rest of the request.
-            if (
-                not use_overall
-                and not was_bare_season
-                and max_month is not None
-                and sorted(set(months)) == list(range(1, max_month + 1))
-            ):
-                use_overall = True
 
             if use_overall:
                 overall_dir = _resolve_overall_dir(season_dir)
@@ -963,7 +954,7 @@ class StatsCog(commands.GroupCog, name="stats", description="View player statist
 
             body_lines = [
                 "## Player Statistics",
-                f"**{player_name} - {label}**",
+                f"**{player_name}**",
                 elo_line,
                 wins_line,
                 losses_line,
@@ -980,8 +971,10 @@ class StatsCog(commands.GroupCog, name="stats", description="View player statist
             embed = discord.Embed(description="\n".join(body_lines), color=ACCENT_COLOR)
             entry_season, entry_month = dir_season_month[dir_path]
             recorded = _compute_recorded_date(guild_id, entry_season, entry_month)
+            footer_lines = [label]
             if recorded is not None:
-                embed.set_footer(text=_format_recorded_on(recorded))
+                footer_lines.append(_format_recorded_on(recorded))
+            embed.set_footer(text="\n".join(footer_lines))
             avatar_url = await self._get_display_avatar_url(ctx, ctx.author, ctx.author.id)
             if avatar_url:
                 embed.set_thumbnail(url=avatar_url)

@@ -327,7 +327,7 @@ class HistoryView(discord.ui.LayoutView):
                     title="Player Not Registered",
                     description=(
                         f"{self.target.mention} is not registered. "
-                        "Use `-register <n>` to sign up!"
+                        "Use `-register <name>` to register"
                     ),
                     color=discord.Color.red(),
                 ),
@@ -429,7 +429,7 @@ class HistoryView(discord.ui.LayoutView):
                     title="Player Not Registered",
                     description=(
                         f"{self.target.mention} is not registered. "
-                        "Use `-register <n>` to sign up!"
+                        "Use `-register <name>` to register"
                     ),
                     color=discord.Color.red(),
                 ),

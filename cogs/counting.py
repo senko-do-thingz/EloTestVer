@@ -145,7 +145,7 @@ class Counting(commands.Cog):
                     "Start counting from **1**!\n\n"
                     "**Rules:**\n"
                     "- Each person counts **one number**\n"
-                    "- Wrong number → **restart from 1**\n"
+                    "- Wrong number -> **restart from 1**\n"
                     "- **No consecutive counts by the same person**\n"
                     "- **One count per person per day**"
                 ),

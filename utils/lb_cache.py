@@ -30,7 +30,7 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-# (guild_id, category, page) → PNG bytes
+# (guild_id, category, page) -> PNG bytes
 _cache: dict[tuple[int, str, int], bytes] = {}
 
 # Track in-progress rebuild tasks to avoid running two at once for the same guild

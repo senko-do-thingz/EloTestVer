@@ -1,7 +1,7 @@
 """
 season_view.py
 --------------
-Season → Month → LB navigation views.
+Season -> Month -> LB navigation views.
 
 Flow:
   SeasonView  (dropdown of seasons)
@@ -9,7 +9,7 @@ Flow:
          └─ MonthView  (dropdown of months + Back button)
               └─ MonthDropdown.callback
                    └─ LBView  (paginated leaderboard)
-                        └─ LBBackBtn.callback  → back to MonthView, image stays
+                        └─ LBBackBtn.callback  -> back to MonthView, image stays
 """
 
 from __future__ import annotations
@@ -175,7 +175,7 @@ class MonthDropdown(discord.ui.Select):
 
 
 # ---------------------------------------------------------------------------
-# Back button inside LBView  →  removes embed/view, keeps the image
+# Back button inside LBView  ->  removes embed/view, keeps the image
 # ---------------------------------------------------------------------------
 
 class LBBackBtn(discord.ui.Button):

@@ -108,7 +108,7 @@ class TestCalculateEloScores:
         w_sweep, _ = calculate_elo(500, 500, total_games=2, winner_score=2, loser_score=0)
         # 3-0 dominant (total_games=3, same margin ratio)
         w_3game, _ = calculate_elo(500, 500, total_games=3, winner_score=3, loser_score=0)
-        # More total_games → more raw_gain; both have same sweep_factor
+        # More total_games -> more raw_gain; both have same sweep_factor
         assert (w_3game - 500) > (w_sweep - 500)
 
     def test_bo7_4_0_gets_bonus(self):
@@ -127,7 +127,7 @@ class TestCalculateEloEdgeCases:
     def test_equal_elo_equal_games(self):
         """Standard 1v1 at equal Elo.
 
-        Formula: raw_gain = 20 * 1 * (1 - 0.5) + 5 = 15, sweep_factor = 1.0 → gain = 15.
+        Formula: raw_gain = 20 * 1 * (1 - 0.5) + 5 = 15, sweep_factor = 1.0 -> gain = 15.
         """
         new_w, new_l = calculate_elo(500, 500)
 

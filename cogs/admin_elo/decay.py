@@ -8,6 +8,8 @@ logic instead of duplicating it.
 from __future__ import annotations
 
 import asyncio
+import os
+import tempfile as _tempfile
 
 import discord
 from discord.ext import commands
@@ -106,9 +108,9 @@ class AdminEloDecayCog(AdminEloBaseCog):
     async def _announce_league_changes(
         self,
         guild: discord.Guild,
-        league_changes: list[tuple[str, str, str]],
+        league_changes_file: str,
     ) -> None:
-        await announce_league_changes(guild, league_changes)
+        await announce_league_changes(guild, league_changes_file)
 
     # ------------------------------------------------------------------
     # Commands
@@ -393,11 +395,13 @@ class AdminEloDecayCog(AdminEloBaseCog):
         # reaction confirmation needed - the -decay confirmation the admin
         # already gave covers this too, so everything starts fresh for the
         # next season without an extra manual step.
-        cleared = await clear_all_registrations(self.bot, ctx.guild.id)
+        result = await clear_all_registrations(self.bot, ctx.guild.id)
         c_reg_log_line = (
-            f"Ran `-c_reg` automatically: {cleared} registered player(s) and "
-            "their stats permanently deleted."
-            if cleared
+            f"Ran `-c_reg` automatically: {result.players_cleared} registered "
+            "player(s) and their stats permanently deleted. League role "
+            f"cleanup: {result.roles.removed} removed, {result.roles.failed} "
+            f"failed, {result.roles.not_found} not found in server."
+            if result.players_cleared
             else "Ran `-c_reg` automatically: no registered players to clear."
         )
 
@@ -445,11 +449,11 @@ class AdminEloDecayCog(AdminEloBaseCog):
             conn.commit()
         lb_cache_invalidate(ctx.guild.id)
         lb_cache_rebuild(self.bot, ctx.guild.id)
-        league_changes: list[tuple[str, str, str]] = []
+        league_changes_file = _tempfile.mktemp(suffix=".txt", prefix="league_changes_")
         await sync_league_roles(
-            ctx.guild, silent=True, league_changes_out=league_changes
+            ctx.guild, silent=True, league_changes_file=league_changes_file
         )
-        await self._announce_league_changes(ctx.guild, league_changes)
+        await self._announce_league_changes(ctx.guild, league_changes_file)
 
         purge_log_line = await purge_old_match_history(
             self.bot, ctx.guild.id, new_season, new_month

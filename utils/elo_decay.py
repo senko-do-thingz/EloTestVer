@@ -318,40 +318,45 @@ def chunk_decay_summary(lines: list[str], *, max_len: int = 3800) -> list[str]:
 
 async def announce_league_changes(
     guild: discord.Guild,
-    league_changes: list[tuple[str, str, str]],
+    league_changes_file: str,
 ) -> None:
-    """Send a single consolidated message summarizing all league changes after -decay.
+    """Read the temp file written during sync and send a single consolidated
+    league-change message to announce channels, then delete the file.
 
-    Each line corresponds to one person, without tagging a Role -- only the
-    League name is written out:
-        Decay has been applied, League changes:
-
-        1. @A: from x to y
-        2. @B: from y to z
+    Format (shortened, no @mentions):
+        League changes:
+        **PlayerA**: Gold -> Platinum
+        **PlayerB**: Platinum -> Diamond
     """
-    if not league_changes:
+    # Read and clean up the temp file
+    try:
+        with open(league_changes_file, "r", encoding="utf-8") as f:
+            lines = [l.rstrip("\n") for l in f if l.strip()]
+    except FileNotFoundError:
+        return
+    finally:
+        try:
+            os.remove(league_changes_file)
+        except OSError:
+            pass
+
+    if not lines:
         return
 
     announce_channels = get_league_announce_channels(guild)
     if not announce_channels:
         return
 
-    lines = [
-        f"{i}. {mention}: from {old_name} to {new_name}"
-        for i, (mention, old_name, new_name) in enumerate(league_changes, start=1)
-    ]
-
-    header = "Decay has been applied, League changes:"
+    header = "League changes:"
     # Discord limits messages to 2000 characters -> split into multiple
-    # messages if there are too many changes, while keeping the original
-    # numbering on each line.
+    # messages if there are too many changes.
     chunks: list[str] = []
     current = header
     for line in lines:
-        candidate = f"{current}\n\n{line}" if current == header else f"{current}\n{line}"
+        candidate = f"{current}\n{line}"
         if len(candidate) > 1900:
             chunks.append(current)
-            current = f"{header} (cont.)\n\n{line}"
+            current = f"{header} (cont.)\n{line}"
         else:
             current = candidate
     chunks.append(current)
@@ -362,6 +367,7 @@ async def announce_league_changes(
                 await ch.send(chunk)
         except Exception:
             pass
+
 
 
 # ---------------------------------------------------------------------------
