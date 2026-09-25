@@ -6,8 +6,8 @@ Internally, implementations live in submodules to match the project diagram.
 """
 
 from datetime import datetime, timezone
-from .elo import calculate_elo, calculate_win_rate  # noqa: F401
-from .guards import NAME_RULE_TEXT, is_admin, is_admin_interaction, is_valid_name  # noqa: F401
+from .elo import calculate_elo, calculate_elo_detailed, calculate_win_rate  # noqa: F401
+from .guards import NAME_MAX_LENGTH, NAME_MIN_LENGTH, NAME_RULE_TEXT, is_admin, is_admin_interaction, is_valid_name  # noqa: F401
 from db.h2h_db import (  # noqa: F401
     add_h2h_match,
     get_h2h_stats as get_head_to_head_stats,

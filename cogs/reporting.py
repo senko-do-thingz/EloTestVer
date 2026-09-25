@@ -21,7 +21,7 @@ from db.match_history_db import (
     next_match_id,
     trim_match_history,
 )
-from utils import calculate_elo, is_admin, is_admin_interaction, sync_league_roles
+from utils import calculate_elo_detailed, is_admin, is_admin_interaction, sync_league_roles
 from utils.lb_cache import invalidate as lb_cache_invalidate, schedule_rebuild as lb_cache_rebuild
 from config import YES_EMOJI, NO_EMOJI
 from utils.slash_ctx import SlashContext
@@ -30,11 +30,6 @@ logger = logging.getLogger(__name__)
 
 
 class ReportingCog(commands.Cog):
-    EXPECTED_OUTCOME_DIVISOR = 1147.44429731658
-    RAW_GAIN_MULTIPLIER = 20
-    SET_WIN_BONUS = 5
-    SWEEP_REDUCTION_FACTOR = 0.076923
-    BO7_FIXED_BONUS = 2
 
     def __init__(self, bot: commands.Bot):
         self.bot = bot
@@ -104,58 +99,6 @@ class ReportingCog(commands.Cog):
                 await message.remove_reaction(emoji, bot_user)
             except Exception:
                 pass
-
-    def _calculate_new_formula(
-        self,
-        winner_elo: int,
-        loser_elo: int,
-        winner_score: int,
-        loser_score: int,
-    ) -> dict:
-        total_games = winner_score + loser_score
-        # Bug #9 fix: guard against zero-division if scores are somehow both 0
-        if total_games == 0:
-            raise ValueError("total_games cannot be zero (winner_score + loser_score == 0)")
-        elo_diff = abs(winner_elo - loser_elo)
-
-        expected_lower = 1 / (1 + (10 ** (elo_diff / self.EXPECTED_OUTCOME_DIVISOR)))
-        expected_winner = 1 - expected_lower if winner_elo >= loser_elo else expected_lower
-        quotient = winner_score / total_games
-
-        raw_gain = (
-            self.RAW_GAIN_MULTIPLIER * total_games * (quotient - expected_winner)
-            + self.SET_WIN_BONUS
-        )
-
-        score_gap = winner_score - loser_score
-        sweep_factor = 1 - (self.SWEEP_REDUCTION_FACTOR * (score_gap - 1))
-        actual_gain = raw_gain * sweep_factor
-
-        bonus_raw = total_games / 4
-        bo7_winner_bonus = self.BO7_FIXED_BONUS if winner_score == 4 else 0
-        bo7_loser_bonus = -self.BO7_FIXED_BONUS if winner_score == 4 else 0
-
-        winner_pre_round = winner_elo + actual_gain + bonus_raw + bo7_winner_bonus
-        loser_pre_round = loser_elo - actual_gain + bonus_raw + bo7_loser_bonus
-
-        return {
-            "total_games": total_games,
-            "elo_diff": elo_diff,
-            "expected_lower": expected_lower,
-            "expected_winner": expected_winner,
-            "quotient": quotient,
-            "raw_gain": raw_gain,
-            "score_gap": score_gap,
-            "sweep_factor": sweep_factor,
-            "actual_gain": actual_gain,
-            "bonus_raw": bonus_raw,
-            "bo7_winner_bonus": bo7_winner_bonus,
-            "bo7_loser_bonus": bo7_loser_bonus,
-            "winner_pre_round": winner_pre_round,
-            "loser_pre_round": loser_pre_round,
-            "new_winner_elo": round(winner_pre_round),
-            "new_loser_elo": round(loser_pre_round),
-        }
 
     # ------------------------------------------------------------------
     # Score / player parsing
@@ -313,7 +256,7 @@ class ReportingCog(commands.Cog):
                 cursor.execute("SELECT elo FROM players WHERE id=?", (loser.id,))
                 preview_loser_elo = (cursor.fetchone() or (500,))[0]
 
-            preview_calc = self._calculate_new_formula(
+            preview_calc = calculate_elo_detailed(
                 preview_winner_elo, preview_loser_elo, winner_score, loser_score,
             )
             preview_new_winner_elo = preview_calc["new_winner_elo"]
@@ -323,13 +266,9 @@ class ReportingCog(commands.Cog):
 
             comparison_text = ""
             if show_formula_comparison:
-                base_winner_elo, base_loser_elo = calculate_elo(
-                    preview_winner_elo, preview_loser_elo, total_games, winner_score, loser_score
-                )
-                old_actual_gain = round(base_winner_elo - preview_winner_elo)
                 bonus_text = f"{preview_calc['bonus_raw']:.2f}".rstrip("0").rstrip(".")
                 comparison_text = (
-                    "\n**Dev Mode - Old vs New Formula:**\n"
+                    "\n**Dev Mode - Formula Breakdown:**\n"
                     f"Input: winner_elo={preview_winner_elo}, loser_elo={preview_loser_elo}, score={winner_score}-{loser_score}, total_games={preview_calc['total_games']}\n"
                     f"Elo diff = {preview_calc['elo_diff']}\n"
                     f"Expected winner = {preview_calc['expected_winner']:.6f}\n"
@@ -338,8 +277,7 @@ class ReportingCog(commands.Cog):
                     f"Actual gain = {preview_calc['actual_gain']:.6f}\n"
                     f"Extra by set length = {bonus_text}\n"
                     f"BO7 bonus winner/loser = {preview_calc['bo7_winner_bonus']}/{preview_calc['bo7_loser_bonus']}\n"
-                    f"Old formula: {preview_winner_elo + old_actual_gain} / {preview_loser_elo - old_actual_gain}\n"
-                    f"New formula: {preview_new_winner_elo} / {preview_new_loser_elo}\n"
+                    f"Result: {preview_new_winner_elo} / {preview_new_loser_elo}\n"
                 )
 
             # --- Send pending embed and wait for reaction ---
@@ -427,7 +365,7 @@ class ReportingCog(commands.Cog):
                 winner_elo, winner_wins, winner_losses = winner_fresh
                 loser_elo, loser_wins, loser_losses = loser_fresh
 
-                calc = self._calculate_new_formula(
+                calc = calculate_elo_detailed(
                     winner_elo, loser_elo, winner_score, loser_score,
                 )
                 new_winner_elo = calc["new_winner_elo"]
@@ -647,7 +585,7 @@ class ReportingCog(commands.Cog):
             winner_elo, winner_wins, winner_losses, winner_name = winner_data
             loser_elo, loser_wins, loser_losses, loser_name = loser_data
 
-            calc = self._calculate_new_formula(
+            calc = calculate_elo_detailed(
                 winner_elo, loser_elo, winner_score, loser_score,
             )
             new_winner_elo = calc["new_winner_elo"]
