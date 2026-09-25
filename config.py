@@ -13,7 +13,7 @@ else:
     YES_EMOJI = os.getenv("YES_EMOJI", "<:Yes:1390939480139104356>")
     NO_EMOJI = os.getenv("NO_EMOJI", "<:No:1390939497306263603>")
 
-PRIVATE_GUILD_ID = int(os.getenv("PRIVATE_GUILD_ID", "1048217847198916618"))
+PRIVATE_GUILD_ID = 1048217847198916618
 
 
 def get_discord_token() -> str:
