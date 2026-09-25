@@ -1404,6 +1404,40 @@ def render_elo_graph_image(
     line_layer = line_layer.resize((width_px, height_px), Image.LANCZOS)
     img.paste(line_layer, (0, 0), line_layer)
 
+    if compare_series:
+        compare_peak_val = max(elo for _, elo in compare_series)
+        compare_bottom_val = min(elo for _, elo in compare_series)
+
+        if compare_peak_val > compare_bottom_val:
+            compare_peak_idx = [i for i, (_, elo) in enumerate(compare_series) if elo == compare_peak_val][-1]
+            compare_bottom_idx = [i for i, (_, elo) in enumerate(compare_series) if elo == compare_bottom_val][-1]
+
+            compare_xs = _xs_for(len(compare_series))
+            compare_ys = [_y_for(elo) for _, elo in compare_series]
+
+            c_peak_x = compare_xs[compare_peak_idx]
+            c_peak_y = compare_ys[compare_peak_idx]
+            c_bottom_x = compare_xs[compare_bottom_idx]
+            c_bottom_y = compare_ys[compare_bottom_idx]
+
+            r = 4 * GSCALE
+            marker_font = _load_latin_font(12 * GSCALE, bold=True)
+            
+            _FADED_WIN = (87, 242, 135, 140)
+            _FADED_LOSS = (237, 66, 69, 140)
+            
+            # Draw peak (faded green)
+            draw.ellipse((c_peak_x - r, c_peak_y - r, c_peak_x + r, c_peak_y + r), fill=_FADED_WIN)
+            c_peak_text = str(compare_peak_val)
+            c_peak_w = _lb_text_width(draw, c_peak_text, marker_font)
+            draw.text((c_peak_x - c_peak_w // 2, c_peak_y - 20 * GSCALE), c_peak_text, fill=_FADED_WIN, font=marker_font)
+
+            # Draw bottom (faded red)
+            draw.ellipse((c_bottom_x - r, c_bottom_y - r, c_bottom_x + r, c_bottom_y + r), fill=_FADED_LOSS)
+            c_bottom_text = str(compare_bottom_val)
+            c_bottom_w = _lb_text_width(draw, c_bottom_text, marker_font)
+            draw.text((c_bottom_x - c_bottom_w // 2, c_bottom_y + 8 * GSCALE), c_bottom_text, fill=_FADED_LOSS, font=marker_font)
+
     if series:
         # Draw Peak and Bottom markers (green for peak, red for bottom)
         peak_val = max(elo for _, elo in series)
