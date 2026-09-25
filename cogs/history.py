@@ -219,6 +219,28 @@ class HistoryGraphToggleButton(discord.ui.Button):
         await view.update_history(interaction)
 
 
+class HistoryLegendButton(discord.ui.Button):
+    def __init__(self):
+        super().__init__(style=discord.ButtonStyle.secondary, label="Legend")
+
+    async def callback(self, interaction: discord.Interaction):
+        embed = discord.Embed(
+            title="Graph Color Legend",
+            description=(
+                "**Green Line**: Winning streaks (Elo gain).\n"
+                "**Red Line**: Losing streaks (Elo loss).\n"
+                "**Dashed Cyan Line**: Your Elo history from the previous month (for comparison).\n"
+                "**Light Blue Shaded Area**: Rest periods (multi-day gaps where no matches were played).\n\n"
+                "**Example:**\n"
+                "- If you win 3 matches in a row -> the line goes up and is colored green.\n"
+                "- If you lose 2 matches -> the line goes down and is colored red.\n"
+                "- If you don't play for 5 days -> that gap is highlighted with a light blue background."
+            ),
+            color=discord.Color.blue(),
+        )
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+
 # HistoryView is a LayoutView (Components V2), mirroring the leaderboard/stats
 # pattern: Refresh sits INSIDE the colored border as a Section accessory
 # (like an OwO card), with Prev/Next in their own action row underneath.
@@ -250,9 +272,10 @@ class HistoryView(discord.ui.LayoutView):
         self.next_button = HistoryNextPageButton(self)
         self.refresh_button = HistoryRefreshButton(self)
         self.graph_button = HistoryGraphToggleButton(self)
+        self.legend_button = HistoryLegendButton()
 
     async def on_timeout(self) -> None:
-        for item in (self.prev_button, self.next_button, self.refresh_button, self.graph_button):
+        for item in (self.prev_button, self.next_button, self.refresh_button, self.graph_button, self.legend_button):
             item.disabled = True
         if self.message:
             try:
@@ -280,7 +303,7 @@ class HistoryView(discord.ui.LayoutView):
         if self.mode == "graph":
             # Pagination doesn't apply to the whole-month graph view, so hide
             # Prev/Next entirely instead of just disabling them.
-            self.add_item(discord.ui.ActionRow(self.graph_button))
+            self.add_item(discord.ui.ActionRow(self.graph_button, self.legend_button))
         else:
             self.add_item(discord.ui.ActionRow(self.prev_button, self.next_button, self.graph_button))
 

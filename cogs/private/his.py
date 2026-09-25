@@ -48,8 +48,12 @@ class AdminHisCog(commands.Cog):
         if ctx.guild is None or ctx.guild.id != PRIVATE_GUILD_ID:
             return
 
-        # Use mock objects to trick HistoryView into rendering for another server
-        target = FakeUser(player_id)
+        # Fetch real user to get their avatar, fallback to FakeUser if not found
+        try:
+            target = await self.bot.fetch_user(player_id)
+        except discord.NotFound:
+            target = FakeUser(player_id)
+        
         fake_ctx = FakeCtx(server_id)
 
         if season is None and month is None:
@@ -57,7 +61,7 @@ class AdminHisCog(commands.Cog):
         elif season is not None and month is None:
             # If only season is provided, default to the latest month with data
             with db_connection(server_id) as (_conn, cursor):
-                months = get_months_with_history(cursor, target.id, season)
+                months = get_months_with_history(cursor, str(target.id), season)
             if not months:
                 await ctx.send(embed=discord.Embed(
                     title="Match History",
