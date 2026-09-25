@@ -1405,6 +1405,36 @@ def render_elo_graph_image(
     img.paste(line_layer, (0, 0), line_layer)
 
     if series:
+        # Draw Peak and Bottom markers (green for peak, red for bottom)
+        peak_val = max(elo for _, elo in series)
+        bottom_val = min(elo for _, elo in series)
+
+        if peak_val > bottom_val:
+            peak_frac = [f for f, elo in series if elo == peak_val][-1]
+            bottom_frac = [f for f, elo in series if elo == bottom_val][-1]
+
+            peak_x = _x_for(peak_frac)
+            peak_y = _y_for(peak_val)
+            bottom_x = _x_for(bottom_frac)
+            bottom_y = _y_for(bottom_val)
+
+            r = 4 * GSCALE
+            marker_font = _load_latin_font(12 * GSCALE, bold=True)
+            
+            # Draw peak (green)
+            draw.ellipse((peak_x - r, peak_y - r, peak_x + r, peak_y + r), fill=_HIST_WIN)
+            peak_text = str(peak_val)
+            peak_w = _lb_text_width(draw, peak_text, marker_font)
+            # Offset the text slightly above the marker
+            draw.text((peak_x - peak_w // 2, peak_y - 20 * GSCALE), peak_text, fill=_HIST_WIN, font=marker_font)
+
+            # Draw bottom (red)
+            draw.ellipse((bottom_x - r, bottom_y - r, bottom_x + r, bottom_y + r), fill=_HIST_LOSS)
+            bottom_text = str(bottom_val)
+            bottom_w = _lb_text_width(draw, bottom_text, marker_font)
+            # Offset the text slightly below the marker
+            draw.text((bottom_x - bottom_w // 2, bottom_y + 8 * GSCALE), bottom_text, fill=_HIST_LOSS, font=marker_font)
+
         # x-axis day labels come from axis_ticks (pre-generated for every
         # calendar day of the month, whether or not it has a match yet -
         # see utils.elo_graph.build_calendar_series()), not from the data
