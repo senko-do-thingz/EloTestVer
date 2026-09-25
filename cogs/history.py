@@ -148,6 +148,7 @@ class HistoryPreviousPageButton(discord.ui.Button):
         self.custom_view = custom_view
 
     async def callback(self, interaction: discord.Interaction):
+        await interaction.response.defer()
         self.custom_view.page -= 1
         await self.custom_view.update_history(interaction)
 
@@ -158,6 +159,7 @@ class HistoryNextPageButton(discord.ui.Button):
         self.custom_view = custom_view
 
     async def callback(self, interaction: discord.Interaction):
+        await interaction.response.defer()
         self.custom_view.page += 1
         await self.custom_view.update_history(interaction)
 
@@ -168,6 +170,7 @@ class HistoryRefreshButton(discord.ui.Button):
         self.custom_view = custom_view
 
     async def callback(self, interaction: discord.Interaction):
+        await interaction.response.defer()
         self.custom_view.last_updated = datetime.now(timezone.utc)
         await self.custom_view.update_history(interaction)
 
@@ -192,12 +195,13 @@ class HistoryGraphToggleButton(discord.ui.Button):
         self.custom_view = custom_view
 
     async def callback(self, interaction: discord.Interaction):
+        await interaction.response.defer()
         view = self.custom_view
         if view.mode == "history":
             with db_connection(view.ctx.guild.id) as (_conn, cursor):
                 played_any_set = count_player_match_history(cursor, view.target.id) > 0
             if not played_any_set:
-                await interaction.response.send_message(
+                await interaction.followup.send(
                     "You need to play at least 1 set to use this feature.",
                     ephemeral=True,
                 )
@@ -289,7 +293,10 @@ class HistoryView(discord.ui.LayoutView):
 
     async def _send_or_edit(self, interaction_or_target, file: discord.File) -> None:
         if isinstance(interaction_or_target, discord.Interaction):
-            await interaction_or_target.response.edit_message(view=self, attachments=[file])
+            if interaction_or_target.response.is_done():
+                await interaction_or_target.edit_original_response(view=self, attachments=[file])
+            else:
+                await interaction_or_target.response.edit_message(view=self, attachments=[file])
             if interaction_or_target.message:
                 self.message = interaction_or_target.message
             else:
