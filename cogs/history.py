@@ -766,17 +766,25 @@ class HistoryCog(commands.Cog):
 
     @commands.command(
         name="history",
-        help="Show your own match history for this server's current season/month.",
+        help="Show match history. Defaults to yourself and current season/month.",
+        usage="[player] [season] [month]"
     )
     @commands.guild_only()
-    async def history_prefix(self, ctx: commands.Context) -> None:
-        """The only prefix form of this command: `-history`, no arguments.
-        Always shows the invoking user's own history for the server's
-        current season/month. Filtering by player/season/month, or viewing
-        another player's history, is only available via the `/history`
-        slash command."""
+    async def history_prefix(
+        self,
+        ctx: commands.Context,
+        target: discord.User = None,
+        season: int = None,
+        month: int = None
+    ) -> None:
+        """Shows match history. Defaults to yourself and current season/month."""
+        target = target or ctx.author
         current_season, current_month = get_season_month(ctx.guild.id)
-        view = HistoryView(self, ctx, ctx.author, current_season, current_month)
+        
+        season = season or current_season
+        month = month or current_month
+
+        view = HistoryView(self, ctx, target, season, month)
         await view.update_history(ctx)
 
     @app_commands.command(
