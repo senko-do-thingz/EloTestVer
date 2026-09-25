@@ -145,6 +145,11 @@ class RegistrationCog(commands.Cog):
             else:
                 await ctx.send(embed=embed)
 
+        is_valid, reason = is_valid_name(name)
+        if not is_valid:
+            await _finish(_name_error_embed(reason))
+            return
+
         user_id = str(ctx.author.id)
         with db_connection(ctx.guild.id) as (conn, cursor):
             cursor.execute("SELECT id FROM players WHERE id = ?", (user_id,))
@@ -156,13 +161,7 @@ class RegistrationCog(commands.Cog):
                 ))
                 return
 
-        is_valid, reason = is_valid_name(name)
-        if not is_valid:
-            await _finish(_name_error_embed(reason))
-            return
-
-        with db_connection(ctx.guild.id) as (conn, cursor):
-            cursor.execute("SELECT name FROM players WHERE name = ?", (name,))
+            cursor.execute("SELECT name FROM players WHERE LOWER(name) = LOWER(?)", (name,))
             if cursor.fetchone():
                 await _finish(discord.Embed(
                     title="Registration Failed",
@@ -210,7 +209,7 @@ class RegistrationCog(commands.Cog):
                 ))
                 return
 
-            cursor.execute("SELECT name FROM players WHERE name = ?", (name,))
+            cursor.execute("SELECT name FROM players WHERE LOWER(name) = LOWER(?)", (name,))
             if cursor.fetchone():
                 await ctx.send(embed=discord.Embed(
                     title="Registration Failed",
@@ -276,8 +275,9 @@ class RegistrationCog(commands.Cog):
             ))
             return
 
+        user_id_str = str(user_id)
         with db_connection(ctx.guild.id) as (conn, cursor):
-            cursor.execute("SELECT name FROM players WHERE id = ?", (user_id,))
+            cursor.execute("SELECT name FROM players WHERE id = ?", (user_id_str,))
             existing = cursor.fetchone()
             if existing:
                 await ctx.send(embed=discord.Embed(
@@ -287,7 +287,7 @@ class RegistrationCog(commands.Cog):
                 ))
                 return
 
-            cursor.execute("SELECT name FROM players WHERE name = ?", (name,))
+            cursor.execute("SELECT name FROM players WHERE LOWER(name) = LOWER(?)", (name,))
             if cursor.fetchone():
                 await ctx.send(embed=discord.Embed(
                     title="Registration Failed",
@@ -296,7 +296,7 @@ class RegistrationCog(commands.Cog):
                 ))
                 return
 
-            cursor.execute("INSERT INTO players (id, name, elo) VALUES (?, ?, 500)", (user_id, name))
+            cursor.execute("INSERT INTO players (id, name, elo) VALUES (?, ?, 500)", (user_id_str, name))
             conn.commit()
 
         await ctx.send(embed=discord.Embed(
@@ -472,7 +472,7 @@ class RegistrationCog(commands.Cog):
             return
 
         with db_connection(ctx.guild.id) as (conn, cursor):
-            cursor.execute("SELECT id FROM players WHERE name = ?", (new_name,))
+            cursor.execute("SELECT id FROM players WHERE LOWER(name) = LOWER(?)", (new_name,))
             if cursor.fetchone():
                 await ctx.send(embed=discord.Embed(
                     title="Rename Failed",
@@ -530,7 +530,7 @@ class RegistrationCog(commands.Cog):
             return
 
         with db_connection(ctx.guild.id) as (conn, cursor):
-            cursor.execute("SELECT id FROM players WHERE name = ?", (new_name,))
+            cursor.execute("SELECT id FROM players WHERE LOWER(name) = LOWER(?)", (new_name,))
             if cursor.fetchone():
                 await ctx.send(embed=discord.Embed(
                     title="Rename Failed",
@@ -607,7 +607,7 @@ class RegistrationCog(commands.Cog):
             return
 
         with db_connection(ctx.guild.id) as (conn, cursor):
-            cursor.execute("SELECT id FROM players WHERE name = ?", (new_name,))
+            cursor.execute("SELECT id FROM players WHERE LOWER(name) = LOWER(?)", (new_name,))
             if cursor.fetchone():
                 await ctx.send(embed=discord.Embed(
                     title="Rename Failed",

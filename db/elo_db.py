@@ -1,7 +1,7 @@
-import json
 import os
 import re
 import sqlite3
+import threading
 from contextlib import contextmanager
 from typing import TYPE_CHECKING
 
@@ -16,6 +16,7 @@ DB_FOLDER = "databases"
 # call is wasteful. Use a set to migrate each db path only once per process lifetime.
 # ---------------------------------------------------------------------------
 _migrated_dbs: set[str] = set()
+_migrated_dbs_lock = threading.Lock()
 
 
 def get_db_path(guild_id: int | str) -> str:
@@ -136,9 +137,13 @@ def get_database_connection(guild_id: int):
     cursor = conn.cursor()
 
     # Only run migrations once per db path for the lifetime of the process
-    if db_path not in _migrated_dbs:
+    with _migrated_dbs_lock:
+        needs_migration = db_path not in _migrated_dbs
+    
+    if needs_migration:
         _run_migrations(conn, cursor)
-        _migrated_dbs.add(db_path)
+        with _migrated_dbs_lock:
+            _migrated_dbs.add(db_path)
 
     return conn, cursor
 

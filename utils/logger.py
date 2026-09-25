@@ -20,9 +20,7 @@ from typing import Any
 import discord
 
 from db.elo_db import get_log_channel_id
-
-# The guild that hosts the log channel (same constant used by lb_id / st).
-PRIVATE_GUILD_ID = 1048217847198916618
+from config import PRIVATE_GUILD_ID
 
 _LEVEL_COLOR = {
     "INFO":    discord.Color.blue(),

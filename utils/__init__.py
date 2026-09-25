@@ -61,7 +61,8 @@ from .elo_graph import (  # noqa: F401
     find_rest_gaps,
     rest_gap_fractions,
 )
-from .logger import bot_log, PRIVATE_GUILD_ID  # noqa: F401
+from .logger import bot_log  # noqa: F401
+from config import PRIVATE_GUILD_ID  # noqa: F401
 
 
 def sync_against_names(cursor, old_name: str, new_name: str) -> None:
@@ -85,7 +86,7 @@ def format_relative_time(dt: datetime) -> str:
         seconds = 0
     
     if seconds < 60:
-        return f"{seconds} seconds ago" if seconds > 1 else "just now"
+        return f"{seconds} seconds ago" if seconds >= 5 else "just now"
     minutes = seconds // 60
     if minutes < 60:
         return f"{minutes} minutes ago" if minutes > 1 else "1 minute ago"
