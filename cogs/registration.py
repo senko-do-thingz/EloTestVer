@@ -8,6 +8,7 @@ from discord.ext import commands
 
 from db.elo_db import db_connection
 from utils import is_valid_name, is_admin, update_lb_name, sync_against_names, NAME_RULE_TEXT
+from utils.guards import NAME_MIN_LENGTH, NAME_MAX_LENGTH
 from utils.lb_cache import invalidate as lb_cache_invalidate, schedule_rebuild as lb_cache_rebuild
 from config import YES_EMOJI, NO_EMOJI
 
@@ -18,8 +19,66 @@ _RENAME_COOLDOWN_SECONDS = 7 * 24 * 3600
 
 
 def _name_error_embed(reason: str, title: str = "Registration Failed") -> discord.Embed:
-    desc = "You cannot use that name" if reason == "banned" else _NAME_RULE
-    return discord.Embed(title=title, description=desc, color=discord.Color.red())
+    """Build a detailed error embed explaining *exactly* why a name was
+    rejected, based on the structured ``reason`` code from
+    ``is_valid_name()``.  The full naming rules are always appended as
+    context, but the headline message pinpoints the specific problem so
+    the user doesn't have to re-read the whole rule to find out what went
+    wrong.
+
+    Reason codes handled:
+    - ``"banned"``               -> name contains "elobot"
+    - ``"too_short:<len>"``      -> name is too short
+    - ``"too_long:<len>"``       -> name is too long
+    - ``"invalid_chars:<chars>"`` -> name contains specific bad characters
+    - ``"only_spaces"``          -> name is only whitespace
+    - anything else              -> fallback to the full rule text
+    """
+    if reason == "banned":
+        desc = (
+            'Names containing **"elobot"** are not allowed.\n'
+            "Please choose a different name."
+        )
+    elif reason.startswith("too_short:"):
+        actual_len = reason.split(":", 1)[1]
+        desc = (
+            f"Your name is only **{actual_len}** character(s) long - "
+            f"the minimum is **{NAME_MIN_LENGTH}**.\n"
+            "Please choose a longer name."
+        )
+    elif reason.startswith("too_long:"):
+        actual_len = reason.split(":", 1)[1]
+        desc = (
+            f"Your name is **{actual_len}** characters long - "
+            f"the maximum is **{NAME_MAX_LENGTH}**.\n"
+            "Please choose a shorter name."
+        )
+    elif reason == "only_spaces":
+        desc = (
+            "Your name cannot be **only spaces**.\n"
+            "Please include at least one letter, number, or other valid character."
+        )
+    elif reason.startswith("invalid_chars:"):
+        bad_chars = reason.split(":", 1)[1]
+        # Format each bad character with backticks for clarity, and
+        # show at most 10 to avoid an absurdly long list.
+        char_list = list(bad_chars)
+        displayed = [f"`{ch}`" for ch in char_list[:10]]
+        suffix = f" ... and {len(char_list) - 10} more" if len(char_list) > 10 else ""
+        desc = (
+            f"Your name contains invalid character(s): "
+            f"{', '.join(displayed)}{suffix}\n\n"
+            "Only English & accented Latin letters (including Vietnamese), "
+            "numbers, spaces, `.` and `_` are allowed."
+        )
+    else:
+        # Unknown / future reason code - safe fallback.
+        desc = f"Invalid name.\n\n{_NAME_RULE}"
+
+    embed = discord.Embed(title=title, description=desc, color=discord.Color.red())
+    # Always add the full rule as a footer for reference.
+    embed.set_footer(text=_NAME_RULE)
+    return embed
 
 
 class RegistrationCog(commands.Cog):
@@ -86,11 +145,6 @@ class RegistrationCog(commands.Cog):
             else:
                 await ctx.send(embed=embed)
 
-        is_valid, reason = is_valid_name(name)
-        if not is_valid:
-            await _finish(_name_error_embed(reason))
-            return
-
         user_id = str(ctx.author.id)
         with db_connection(ctx.guild.id) as (conn, cursor):
             cursor.execute("SELECT id FROM players WHERE id = ?", (user_id,))
@@ -102,6 +156,12 @@ class RegistrationCog(commands.Cog):
                 ))
                 return
 
+        is_valid, reason = is_valid_name(name)
+        if not is_valid:
+            await _finish(_name_error_embed(reason))
+            return
+
+        with db_connection(ctx.guild.id) as (conn, cursor):
             cursor.execute("SELECT name FROM players WHERE name = ?", (name,))
             if cursor.fetchone():
                 await _finish(discord.Embed(
