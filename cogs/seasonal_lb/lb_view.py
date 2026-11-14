@@ -18,8 +18,9 @@ from db.elo_db import db_connection
 from utils import (
     get_most_played_with,
     get_opponent_games,
-    parse_leaderboard_line,
 )
+
+from utils.lb_archive import parse_leaderboard_lines, read_leaderboard_rows
 
 from .helpers import build_leaderboard_embed
 
@@ -207,18 +208,9 @@ class PlayerSearchModal(discord.ui.Modal, title="Search Player Stats"):
                 file_path = os.path.join(mpath, filename)
                 if not os.path.exists(file_path):
                     continue
-                with open(file_path, "r", encoding="utf-8") as f:
-                    lines = f.readlines()
-                for line in lines:
-                    stripped = line.strip()
-                    if not stripped or stripped.lower().endswith("leaderboard"):
-                        continue
-                    parsed = parse_leaderboard_line(
-                        stripped, win_rate=category == "win_rate"
-                    )
-                    if not parsed:
-                        continue
-                    name, value, discord_id = parsed
+                for name, value, discord_id in read_leaderboard_rows(
+                    file_path, win_rate=category == "win_rate"
+                ):
                     if search_name in name.lower():
                         archive_rows.append((category, name, value, discord_id))
                         if discord_id:
@@ -284,20 +276,14 @@ class PlayerSearchModal(discord.ui.Modal, title="Search Player Stats"):
                 fp = os.path.join(mpath, FILE_MAP[category])
                 if not os.path.exists(fp):
                     return None
-                with open(fp, "r", encoding="utf-8") as f:
-                    raw = f.readlines()
-                all_values = []
-                for line in raw:
-                    s = line.strip()
-                    if not s or s.lower().endswith("leaderboard"):
-                        continue
-                    p = parse_leaderboard_line(s, win_rate=category == "win_rate")
-                    if p:
-                        all_values.append(p[1])
-                if not all_values:
+                values = [
+                    stat for _, stat, _ in read_leaderboard_rows(
+                        fp, win_rate=category == "win_rate"
+                    )
+                ]
+                if not values:
                     return None
-                all_values.sort(reverse=True)
-                return sum(1 for v in all_values if v > value) + 1
+                return sum(1 for stat in values if stat > value) + 1
 
             elo, _ = get_stat_value("elo")
             wins, _ = get_stat_value("wins")
@@ -542,11 +528,9 @@ class LBView(discord.ui.View):
                 self.message = interaction.message
                 return
 
-            players_data = [
-                p
-                for l in data_lines
-                if (p := parse_leaderboard_line(l, win_rate=self.category == "win_rate"))
-            ]
+            players_data = parse_leaderboard_lines(
+                data_lines, win_rate=self.category == "win_rate"
+            )
             players_data.sort(key=lambda x: x[1], reverse=True)
 
             # ── identify current user (for highlighting + My Rank) ────────────
