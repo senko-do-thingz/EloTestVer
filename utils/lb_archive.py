@@ -137,7 +137,7 @@ def sync_discord_ids_to_lb_archives(
             filepath = os.path.join(dirpath, filename)
             win_rate = LB_ARCHIVE_FILES[filename]
 
-            with open(filepath, "r", encoding="utf-8") as f:
+            with open(filepath, "r", encoding="utf-8", newline="") as f:
                 lines = f.readlines()
 
             changed = False
@@ -200,7 +200,7 @@ def update_lb_name(
                 continue
             file_path = os.path.join(root, filename)
             try:
-                with open(file_path, "r", encoding="utf-8") as f:
+                with open(file_path, "r", encoding="utf-8", newline="") as f:
                     lines = f.readlines()
 
                 changed = False
