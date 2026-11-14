@@ -26,6 +26,16 @@ ID1 = "123456789012345678"
 ID2 = "987654321098765432"
 
 
+def run(coro):
+    """Reuse the test event loop so older tests retain get_event_loop support."""
+    try:
+        loop = asyncio.get_event_loop()
+    except RuntimeError:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+    return loop.run_until_complete(coro)
+
+
 @pytest.fixture
 def isolated_db(tmp_path, monkeypatch):
     monkeypatch.setattr(db, "DB_FOLDER", str(tmp_path / "databases"))
@@ -85,7 +95,7 @@ def test_season_picker_discovers_folders_containing_archives(tmp_path):
         ]
         assert embed.title == "Select a Season"
 
-    asyncio.run(exercise())
+    run(exercise())
 
 
 def test_lbs_renders_multiword_names_and_jumps_to_correct_page(
@@ -130,7 +140,7 @@ def test_lbs_renders_multiword_names_and_jumps_to_correct_page(
         assert view.my_rank_button.disabled
         interaction.response.edit_message.assert_awaited_once()
 
-    asyncio.run(exercise())
+    run(exercise())
 
 
 def test_search_modal_merges_legacy_and_identified_categories(
@@ -159,7 +169,7 @@ def test_search_modal_merges_legacy_and_identified_categories(
         assert "70.00%" in embed.description
         assert "Monthly Games" in embed.description
 
-    asyncio.run(exercise())
+    run(exercise())
 
 
 def test_search_modal_does_not_combine_two_players_with_reused_name(
@@ -185,7 +195,7 @@ def test_search_modal_does_not_combine_two_players_with_reused_name(
         assert embed.title == "Multiple Players Found"
         assert "Found 2 players" in embed.description
 
-    asyncio.run(exercise())
+    run(exercise())
 
 
 def test_legacy_my_rank_falls_back_to_registered_multiword_name(
@@ -221,4 +231,4 @@ def test_legacy_my_rank_falls_back_to_registered_multiword_name(
         assert view.page == 0
         assert captured[0][1] == (2, "Sky Runner", "800", True)
 
-    asyncio.run(exercise())
+    run(exercise())
