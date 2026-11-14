@@ -122,7 +122,7 @@ Tên người chơi dài từ 2 đến 20 ký tự, cho phép chữ cái Latin, 
 - `-c_reg` xóa người chơi đã đăng ký và dữ liệu trận đấu liên quan, đồng thời cố gắng gỡ các League role. Dữ liệu daily streak vẫn được giữ lại theo thiết kế. Hãy sao lưu database trước khi thực hiện.
 - Các bảng xếp hạng cũ được lưu trong `lb/<guild_id>/Season <n>/Month <m>/` và thư mục `Overall/` khi có dữ liệu tổng kết.
 
-**Lỗi đã biết:** `-lbs` có thể phân tích sai tên người chơi chứa dấu cách trong file archive. Hiện đã có test ghi nhận nhưng logic parser chưa được sửa.
+**Tương thích archive:** `-lbs` hỗ trợ tên có khoảng trắng và chữ Latin có dấu trong cả file archive mới lẫn file cũ không có Discord ID. Việc tra cứu theo ID chỉ hoạt động khi bản ghi archive chứa ID.
 
 ## Cấu trúc repository
 
@@ -155,7 +155,7 @@ python -m pytest tests -q
 
 GitHub Actions kiểm thử trên Python 3.11 và 3.12 khi có push hoặc pull request vào `main`. Bộ test sử dụng SQLite tạm và các đối tượng Discord giả lập, không cần token thật. Vẫn cần kiểm thử trên Discord thật để xác nhận quyền, reaction, thứ tự role và khả năng gửi tin nhắn.
 
-Các trường hợp `xfail` của `-lbs` là lỗi đã biết, không phải bằng chứng rằng chức năng hoạt động đúng.
+Các regression test của `-lbs` với tên có dấu cách hiện được kiểm tra như những test thông thường và bắt buộc phải đạt.
 
 ## Xử lý sự cố
 

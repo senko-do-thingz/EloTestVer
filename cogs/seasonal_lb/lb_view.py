@@ -197,7 +197,12 @@ class PlayerSearchModal(discord.ui.Modal, title="Search Player Stats"):
 
         try:
             # ── Gather stats for matching players ───────────────────────────
-            stats_data: dict[str, dict] = {}
+            # Group rows by stable Discord ID when available so historical
+            # duplicate names cannot combine two different players' stats.
+            # If a legacy category has no ID, use its name only when exactly
+            # one known ID shares that name in this archive directory.
+            archive_rows: list[tuple[str, str, int | float, str | None]] = []
+            ids_by_name: dict[str, set[str]] = {}
             for category, filename in FILE_MAP.items():
                 file_path = os.path.join(mpath, filename)
                 if not os.path.exists(file_path):
@@ -213,9 +218,24 @@ class PlayerSearchModal(discord.ui.Modal, title="Search Player Stats"):
                     )
                     if not parsed:
                         continue
-                    name, value, _ = parsed
+                    name, value, discord_id = parsed
                     if search_name in name.lower():
-                        stats_data.setdefault(name, {})[category] = value
+                        archive_rows.append((category, name, value, discord_id))
+                        if discord_id:
+                            ids_by_name.setdefault(name.casefold(), set()).add(discord_id)
+
+            stats_data: dict[str, dict] = {}
+            display_names: dict[str, str] = {}
+            player_ids: dict[str, str | None] = {}
+            for category, name, value, discord_id in archive_rows:
+                if discord_id is None:
+                    candidates = ids_by_name.get(name.casefold(), set())
+                    if len(candidates) == 1:
+                        discord_id = next(iter(candidates))
+                key = f"id:{discord_id}" if discord_id else f"name:{name.casefold()}"
+                stats_data.setdefault(key, {})[category] = value
+                display_names[key] = name
+                player_ids[key] = discord_id
 
             if not stats_data:
                 await interaction.response.send_message(
@@ -230,7 +250,7 @@ class PlayerSearchModal(discord.ui.Modal, title="Search Player Stats"):
 
             if len(stats_data) > 1:
                 matches_list = "\n".join(
-                    f"- {n}" for n in list(stats_data.keys())[:10]
+                    f"- {display_names[key]}" for key in list(stats_data)[:10]
                 )
                 if len(stats_data) > 10:
                     matches_list += f"\n... and {len(stats_data) - 10} more"
@@ -248,8 +268,10 @@ class PlayerSearchModal(discord.ui.Modal, title="Search Player Stats"):
                 return
 
             # ── Single player found ─────────────────────────────────────────
-            player_name = list(stats_data.keys())[0]
-            player_stats = stats_data[player_name]
+            player_key = next(iter(stats_data))
+            player_name = display_names[player_key]
+            player_id = player_ids[player_key]
+            player_stats = stats_data[player_key]
 
             def get_stat_value(category: str):
                 value = player_stats.get(category)
@@ -316,9 +338,12 @@ class PlayerSearchModal(discord.ui.Modal, title="Search Player Stats"):
             # Most played against
             try:
                 with db_connection(lb_guild_id) as (conn, cursor):
-                    cursor.execute(
-                        "SELECT id FROM players WHERE name = ?", (player_name,)
-                    )
+                    if player_id:
+                        cursor.execute("SELECT id FROM players WHERE id = ?", (player_id,))
+                    else:
+                        cursor.execute(
+                            "SELECT id FROM players WHERE name = ?", (player_name,)
+                        )
                     id_row = cursor.fetchone()
                     if id_row:
                         pid = str(id_row[0])

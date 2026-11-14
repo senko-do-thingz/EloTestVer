@@ -405,7 +405,7 @@ class RegistrationCog(commands.Cog):
             conn.commit()
 
         try:
-            update_lb_name(ctx.guild.id, current_name, new_name)
+            update_lb_name(ctx.guild.id, current_name, new_name, discord_id=user_id)
         except Exception:
             logger.exception("Failed to update lb name for guild %s", ctx.guild.id)
 
