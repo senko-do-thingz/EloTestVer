@@ -122,7 +122,7 @@ Names must be 2-20 characters. They may contain ASCII letters, digits, spaces, u
 - `-c_reg` removes registered players and associated match data and attempts to remove league roles. Daily activity streak data is deliberately retained. Treat this command as irreversible and keep backups.
 - Historical leaderboard files are stored under `lb/<guild_id>/Season <n>/Month <m>/` and `Overall/` as appropriate. The bot also supports existing guild-folder suffixes.
 
-**Known limitation:** Archived `-lbs` files with multi-word player names may be parsed incorrectly by the current archive reader. A regression test documents this pending fix. Current leaderboard display and archived leaderboard browsing are separate paths.
+**Archive compatibility:** `-lbs` supports player names with spaces and accented Latin characters in both modern archives and legacy files without Discord IDs. ID-based lookup requires archive entries to contain an ID.
 
 ## Repository layout
 
@@ -157,7 +157,7 @@ python -m pytest tests -q
 
 GitHub Actions runs the syntax check and full test suite on pushes and pull requests to `main` using Python 3.11 and 3.12. The tests use temporary databases and mocked Discord interactions. They cannot replace a live Discord end-to-end check of bot permissions, reactions, role hierarchy, and message delivery.
 
-Some known `-lbs` regression cases are marked `xfail` while that feature remains unfixed. They are not passing behavior tests.
+Multi-word-name regression tests for `-lbs` are enforced as regular passing tests.
 
 ## Troubleshooting
 
