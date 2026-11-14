@@ -80,7 +80,9 @@ def test_season_picker_discovers_folders_containing_archives(tmp_path):
     async def exercise():
         view, embed = SeasonalLBBaseCog._build_season_view(str(base), 987, int(ID1))
         assert view is not None
-        assert view.seasons == ["Season 2", "Season 10"]
+        assert [option.label for option in view.children[0].options] == [
+            "Season 2", "Season 10"
+        ]
         assert embed.title == "Select a Season"
 
     asyncio.run(exercise())
