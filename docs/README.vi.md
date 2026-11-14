@@ -1,34 +1,34 @@
-# EloBot - Bot xep hang Elo cho Discord
+# EloBot - Bot xếp hạng Elo cho Discord
 
-**Tac gia:** Senko
+**Tác giả:** Senko
 
-**Ngon ngu tai lieu:** [English](../README.md) | [Tiếng Việt](README.vi.md) | [日本語](README.ja.md)
+**Ngôn ngữ tài liệu:** [English](../README.md) | [Tiếng Việt](README.vi.md) | [日本語](README.ja.md)
 
-## Gioi thieu
+## Giới thiệu
 
-EloBot la bot Discord viet bang Python, dung de dang ky nguoi choi, bao cao ket qua tran dau, tinh diem Elo, xem bang xep hang va lich su. Du lieu duoc luu trong SQLite rieng theo tung server Discord. Tien to lenh mac dinh la `-`.
+EloBot là bot Discord viết bằng Python để đăng ký người chơi, báo cáo kết quả trận đấu, tính điểm Elo và xem bảng xếp hạng, thống kê, lịch sử. Dữ liệu được lưu trong cơ sở dữ liệu SQLite riêng cho từng server Discord. Tiền tố lệnh mặc định là `-`.
 
-Tai lieu co ba ngon ngu: tieng Anh, tieng Viet va tieng Nhat. Hien tai phan lon thong bao cua bot van bang tieng Anh. Chon ngon ngu tai lieu khong tu dong doi ngon ngu giao dien Discord. Database co truong language, nhung he thong dich giao dien bot day du sang ca ba ngon ngu chua duoc trien khai.
+Tài liệu có ba ngôn ngữ: tiếng Anh, tiếng Việt và tiếng Nhật. Hiện tại, phần lớn thông báo bên trong bot vẫn bằng tiếng Anh. Chọn ngôn ngữ tài liệu không tự động thay đổi ngôn ngữ giao diện Discord. Cơ sở dữ liệu có trường `language` nhưng hệ thống dịch toàn bộ giao diện bot sang ba ngôn ngữ chưa được triển khai.
 
-## Tinh nang chinh
+## Tính năng chính
 
-- Dang ky, doi ten va quan ly nguoi choi
-- Bao cao tran dau co xac nhan va cap nhat diem Elo
-- Bang xep hang Elo, thang, thua, ty le thang, chuoi tran va so tran trong thang
-- Thong ke, so sanh nguoi choi, lich su va xuat file Excel
-- Bang xep hang theo mua, kho luu tru thang va tong ket mua
-- Decay hang thang tu dong, backup, chuyen mua va xoa dang ky cuoi mua
-- Quan ly league va role Discord
-- Counting, ho tro tin nhan rieng va cong cu quan tri
+- Đăng ký, đổi tên và quản lý người chơi
+- Báo cáo trận đấu có xác nhận, cập nhật Elo và lưu lịch sử
+- Bảng xếp hạng theo Elo, số trận thắng, thua, tỷ lệ thắng, chuỗi trận và hoạt động trong tháng
+- Thống kê chi tiết, so sánh người chơi, ảnh lịch sử và xuất dữ liệu Excel
+- Bảng xếp hạng theo mùa, lưu trữ từng tháng và tổng kết cả mùa
+- Decay hàng tháng tự động, sao lưu database, chuyển mùa và xóa đăng ký khi kết thúc mùa
+- Quản lý League và role trên Discord
+- Counting, hỗ trợ tin nhắn riêng và công cụ dành cho quản trị viên
 
-## Yeu cau
+## Yêu cầu hệ thống
 
-- Python 3.11 hoac 3.12, hai phien ban dang duoc CI kiem thu
-- Cac thu vien trong `requirements.txt`, gom discord.py 2.7.1
-- Discord bot token va quyen cau hinh bot tren server
-- SQLite co san trong thu vien chuan Python
+- Python 3.11 hoặc 3.12, là hai phiên bản đang được kiểm thử trong CI
+- Các thư viện trong `requirements.txt`, bao gồm discord.py 2.7.1
+- Discord bot token cùng quyền cấu hình bot trên server
+- SQLite có sẵn trong thư viện chuẩn Python
 
-## Cai dat
+## Cài đặt
 
 1. Clone repository:
 
@@ -37,7 +37,7 @@ Tai lieu co ba ngon ngu: tieng Anh, tieng Viet va tieng Nhat. Hien tai phan lon 
    cd EloTestVer
    ~~~
 
-2. Tao moi truong ao:
+2. Tạo môi trường ảo Python:
 
    ~~~bash
    python -m venv .venv
@@ -45,105 +45,107 @@ Tai lieu co ba ngon ngu: tieng Anh, tieng Viet va tieng Nhat. Hien tai phan lon 
 
    Windows: `.venv\Scripts\activate`
 
-   macOS / Linux: `source .venv/bin/activate`
+   macOS hoặc Linux: `source .venv/bin/activate`
 
-3. Cai thu vien:
+3. Cài đặt các thư viện:
 
    ~~~bash
    python -m pip install -r requirements.txt
    ~~~
 
-4. Tao file `.env` o thu muc goc:
+4. Tạo file `.env` tại thư mục gốc:
 
    ~~~dotenv
    DISCORD_TOKEN=replace_with_your_bot_token
    ~~~
 
-   Khong commit token hoac file `.env`. File `config.py` doc token tu bien moi truong. Co the dat `IS_PRODUCTION=true` de su dung cau hinh reaction production va tuy chinh `YES_EMOJI`, `NO_EMOJI` neu can.
+   Không commit token hoặc file `.env` lên GitHub. File `config.py` sẽ đọc token từ biến môi trường. Có thể đặt `IS_PRODUCTION=true` để sử dụng cấu hình reaction cho môi trường production và tùy chỉnh `YES_EMOJI`, `NO_EMOJI` nếu cần.
 
-5. Trong Discord Developer Portal, bat Message Content intent de bot nhan lenh prefix. Cap quyen gui tin nhan, embed, reaction va quan ly role neu can.
-6. Chay bot:
+5. Trong Discord Developer Portal, bật Message Content intent để bot nhận lệnh có tiền tố. Cấp quyền gửi tin nhắn, embed, reaction và quyền quản lý role nếu sử dụng chức năng League.
+6. Khởi chạy bot:
 
    ~~~bash
    python elobot.py
    ~~~
 
-Test tu dong khong yeu cau token va khong dang nhap Discord.
+Các bài test tự động không cần bot token và không kết nối tới Discord thật.
 
-## Lenh thong dung
+## Lệnh dành cho người dùng
 
-Danh sach duoi day gom cac lenh chinh. Xem `-help`, `-adhelp` hoac `/help` de biet cu phap va gioi han quyen cua tung lenh.
+Bảng dưới đây liệt kê các lệnh phổ biến. Một số lệnh chỉ dùng với tiền tố `-`, số khác hỗ trợ slash command. Sử dụng `-help`, `-adhelp` hoặc `/help` để xem cú pháp và quyền hạn đầy đủ.
 
-| Muc dich | Lenh | Ghi chu |
+| Chức năng | Lệnh | Ghi chú |
 | --- | --- | --- |
-| Dang ky | `-register <name>` | Elo khoi tao la 500 |
-| Doi ten | `-rename <new_name>` | Cooldown 7 ngay |
-| Bao cao tran | `-report @player1 3 1 @player2` | Co alias `-rp` |
-| Bao cao rut gon | `-report @winner 31 @loser` | Ho tro `3-1` va `3:1` |
-| Bang xep hang hien tai | `-leaderboard` hoac `-lb` | Chon loai bang xep hang |
-| Bang xep hang luu tru | `-lbs` | Chon mua va thang |
-| Thong ke | `-stats` | Xem huong dan khi can xem nguoi khac |
-| Lich su | `-history` | Lenh slash co lua chon chi tiet hon |
-| So sanh | `-compare` hoac `-cp` | So sanh nguoi choi |
-| League | `-leagues` | Xem thong tin league |
-| Tro giup | `-help` hoac `/help` | Huong dan cac lenh |
+| Đăng ký | `-register <name>` | Elo khởi tạo là 500 |
+| Đổi tên | `-rename <new_name>` | Cooldown thông thường là 7 ngày |
+| Báo cáo trận đấu | `-report @player1 3 1 @player2` | Có bí danh `-rp` |
+| Báo cáo tỷ số rút gọn | `-report @winner 31 @loser` | Hỗ trợ cả `3-1` và `3:1` |
+| Bảng xếp hạng hiện tại | `-leaderboard` hoặc `-lb` | Chọn loại bảng xếp hạng và chuyển trang |
+| Bảng xếp hạng đã lưu | `-lbs` | Chọn mùa và tháng |
+| Thống kê người chơi | `-stats` | Xem help để tra cứu người chơi khác |
+| Lịch sử trận đấu | `-history` | Bản slash có thêm tùy chọn |
+| So sánh người chơi | `-compare` hoặc `-cp` | So sánh các người chơi đã đăng ký |
+| League | `-leagues` | Xem thông tin League |
+| Trợ giúp | `-help` hoặc `/help` | Danh sách và hướng dẫn lệnh |
 
-Lenh admin yeu cau role `Elo Bot Manager`, tru khi phan huong dan cua lenh ghi dieu kien rieng.
+## Lệnh quản trị
 
-| Muc dich | Lenh |
-| --- | --- |
-| Dang ky ho | `-register_o`, `-register_oid` |
-| Doi ten ho | `-rename_o`, `-rename_oid` |
-| Bao cao tran theo ID | `-ad_rp` |
-| Sua Elo va thong ke | `-set_e`, `-set_w`, `-set_l`, `-set_stats` |
-| Reset Elo | `-reset_e` |
-| Xoa toan bo dang ky | `-c_reg` |
-| Xuat bang xep hang | `-get_lb` |
-| Tong ket mua | `-sum_lb` |
-| Dat so thang trong mua | `/months` |
-| Dat mua va thang hien tai | `/season` |
-| Xem hoac thuc hien decay | `-decay` |
-| Dat kenh log decay | `-decay_setup` |
+Các lệnh quản trị thường yêu cầu role `Elo Bot Manager`, trừ khi hướng dẫn của từng lệnh có quy định khác.
 
-Cac lenh private nhu quan tri support, moderation va kiem tra server khac co rang buoc quyen rieng.
+| Chức năng | Lệnh | Ghi chú |
+| --- | --- | --- |
+| Đăng ký hộ | `-register_o`, `-register_oid` | Theo mention hoặc Discord ID |
+| Đổi tên hộ | `-rename_o`, `-rename_oid` | Theo mention hoặc Discord ID |
+| Báo cáo trận theo ID | `-ad_rp` | Quản trị viên thực hiện |
+| Điều chỉnh Elo và thống kê | `-set_e`, `-set_w`, `-set_l`, `-set_stats` | Xem `-adhelp` để biết tham số |
+| Reset Elo | `-reset_e` | Cần xác nhận |
+| Xóa toàn bộ đăng ký | `-c_reg` | Thao tác phá hủy dữ liệu, cần xác nhận |
+| Xuất bảng xếp hạng | `-get_lb` | Tạo các file archive |
+| Tổng hợp bảng xếp hạng mùa | `-sum_lb` | Tổng kết dữ liệu đã lưu |
+| Thiết lập số tháng trong mùa | `/months` | Giới hạn số tháng cho mỗi mùa |
+| Chọn mùa và tháng hiện tại | `/season` | Cập nhật vị trí mùa |
+| Kiểm tra hoặc chạy Decay | `-decay` | Chỉnh sửa thủ công cần dev mode và xác nhận |
+| Cấu hình kênh log Decay | `-decay_setup` | Đặt hoặc xóa kênh log |
 
-## Quy tac dat ten
+Ngoài ra còn có các lệnh về quản lý League, support, moderation và các lệnh riêng của server quản trị. Những lệnh nội bộ không dành cho người dùng thông thường.
 
-Ten nguoi choi dai 2-20 ky tu. Cho phep chu Latin, chu so, khoang trang, dau gach duoi, dau cham va chu Latin co dau, bao gom tieng Viet. Cam ten chi co khoang trang, ten chua `elobot` khong phan biet hoa thuong, va ky tu khong ho tro. Khong mac dinh rang ten bang chu Nhat duoc chap nhan.
+## Quy tắc đặt tên
 
-## Elo, bao cao tran va Decay
+Tên người chơi dài từ 2 đến 20 ký tự, cho phép chữ cái Latin, chữ số, khoảng trắng, dấu gạch dưới, dấu chấm và các ký tự Latin có dấu, bao gồm tiếng Việt. Tên chỉ có khoảng trắng, tên chứa `elobot` (không phân biệt chữ hoa hay chữ thường) hoặc chứa ký tự không hỗ trợ sẽ bị từ chối. Không nên giả định rằng tên bằng chữ Nhật có thể sử dụng được.
 
-- Nguoi choi moi bat dau voi 500 Elo. Cong thuc nam trong `utils/elo.py`, co dieu chinh theo ty so va bonus.
-- Bao cao tran co the yeu cau nguoi choi xac nhan bang reaction truoc khi ghi du lieu.
-- `/months` dat so thang toi da cho mua. `/season` dat vi tri mua/thang. Lenh `-decay` thu cong chi thay doi du lieu khi dev mode cho phep.
-- Job Decay tu dong kiem tra vao ngay dau tien moi thang luc 00:10 UTC. Thang thong thuong se decay va reset so tran trong thang. Cuoi mua se luu archive, chay cung logic xoa dang ky nhu `-c_reg` va chuyen sang mua tiep theo.
-- `-c_reg` xoa nguoi choi va lich su tran lien quan, thu go bo league role. Du lieu daily streak duoc giu lai co chu dich. Nen backup truoc khi thao tac.
-- Lich su bang xep hang nam trong `lb/<guild_id>/Season <n>/Month <m>/` va thu muc `Overall/`.
+## Elo, báo cáo trận và Decay
 
-**Loi da biet:** `-lbs` co the doc sai ten nguoi choi co dau cach trong file archive. Hien da co test ghi nhan loi nay, nhung logic parser chua duoc sua.
+- Người chơi mới bắt đầu với 500 Elo. Công thức tính trong `utils/elo.py` có điều chỉnh theo tỷ số và các hệ số thưởng.
+- Báo cáo trận đấu có thể yêu cầu người chơi xác nhận bằng reaction trước khi dữ liệu được ghi.
+- `/months` đặt số tháng tối đa trong một mùa. `/season` đặt mùa và tháng hiện tại. `-decay` chỉ cho phép cập nhật dữ liệu thủ công khi dev mode được bật và thao tác đã được xác nhận.
+- Job Decay tự động chạy kiểm tra vào ngày đầu tiên của mỗi tháng lúc 00:10 UTC. Ở tháng thông thường, bot áp dụng Decay và đặt lại thống kê trong tháng. Vào cuối mùa, bot lưu archive, gọi cùng logic xóa đăng ký như `-c_reg` rồi chuyển sang mùa tiếp theo.
+- `-c_reg` xóa người chơi đã đăng ký và dữ liệu trận đấu liên quan, đồng thời cố gắng gỡ các League role. Dữ liệu daily streak vẫn được giữ lại theo thiết kế. Hãy sao lưu database trước khi thực hiện.
+- Các bảng xếp hạng cũ được lưu trong `lb/<guild_id>/Season <n>/Month <m>/` và thư mục `Overall/` khi có dữ liệu tổng kết.
 
-## Cau truc repository
+**Lỗi đã biết:** `-lbs` có thể phân tích sai tên người chơi chứa dấu cách trong file archive. Hiện đã có test ghi nhận nhưng logic parser chưa được sửa.
+
+## Cấu trúc repository
 
 ~~~text
 EloTestVer/
-  elobot.py                 Diem khoi chay bot va nap cogs
-  config.py                 Bien moi truong va reaction
-  requirements.txt          Danh sach thu vien
-  cogs/                     Lenh nguoi dung va quan tri
-    admin_elo/              Decay va cap nhat du lieu
-    roles/                  Quan ly league role
-    seasonal_lb/            Bang xep hang theo mua
-    private/                Lenh quan tri gioi han
-  db/                       SQLite va truy van
-  utils/                    Elo, ve anh, cache va helpers
-  tests/                    Test tu dong
-  .github/workflows/        GitHub Actions
-  assets/                   Font de ve anh
-  databases/                Database khi chay (khong commit)
-  lb/                       Archive khi chay (khong commit)
+  elobot.py                 Khởi chạy bot và nạp các cog
+  config.py                 Biến môi trường và cấu hình reaction
+  requirements.txt          Các thư viện cần thiết
+  cogs/                     Lệnh người dùng và quản trị
+    admin_elo/              Decay, dọn đăng ký và cập nhật thống kê
+    roles/                  Quản lý League role
+    seasonal_lb/            Giao diện bảng xếp hạng theo mùa
+    private/                Lệnh quản trị hạn chế
+  db/                       Schema và xử lý SQLite
+  utils/                    Elo, rendering, archive, cache và tiện ích
+  tests/                    Bộ kiểm thử tự động
+  .github/workflows/        Cấu hình GitHub Actions
+  assets/                   Font dùng để vẽ ảnh
+  databases/                SQLite khi chạy bot (không commit)
+  lb/                       File archive khi chạy bot (không commit)
 ~~~
 
-## Chay test va CI
+## Chạy test và CI
 
 ~~~bash
 python -m pip install -r requirements.txt "pytest>=8,<9"
@@ -151,15 +153,17 @@ python -m compileall -q cogs db utils tests elobot.py
 python -m pytest tests -q
 ~~~
 
-GitHub Actions chay tren Python 3.11 va 3.12 khi push hoac mo pull request vao `main`. Test su dung database tam va mock Discord, khong can token that. Van can kiem thu tren server Discord that cho quyen han, reaction, role va delivery. Cac truong hop `xfail` cua `-lbs` la loi da biet, khong phai chuc nang da hoat dong.
+GitHub Actions kiểm thử trên Python 3.11 và 3.12 khi có push hoặc pull request vào `main`. Bộ test sử dụng SQLite tạm và các đối tượng Discord giả lập, không cần token thật. Vẫn cần kiểm thử trên Discord thật để xác nhận quyền, reaction, thứ tự role và khả năng gửi tin nhắn.
 
-## Xu ly su co
+Các trường hợp `xfail` của `-lbs` là lỗi đã biết, không phải bằng chứng rằng chức năng hoạt động đúng.
 
-- Thieu `DISCORD_TOKEN`: tao file `.env` hoac dat bien moi truong.
-- Lenh prefix khong chay: kiem tra Message Content intent, quyen bot va log nap extension.
-- Bao `Permission Denied`: kiem tra role `Elo Bot Manager` va gioi han server.
-- Khong tim thay leaderboard archive: kiem tra export va thu muc `lb`.
-- Loi reaction / role: kiem tra Discord permissions, thu tu role va rate limit.
-- Test fail: xem log GitHub Actions va sua nguyen nhan, khong bo qua assertion.
+## Xử lý sự cố
 
-**Phat trien boi Senko.**
+- Thiếu `DISCORD_TOKEN`: tạo file `.env` hoặc khai báo biến môi trường.
+- Lệnh có tiền tố không hoạt động: kiểm tra Message Content intent, quyền của bot và log khi nạp extension.
+- Thông báo `Permission Denied`: kiểm tra role `Elo Bot Manager` và giới hạn theo server.
+- Không tìm thấy archive: kiểm tra quá trình xuất dữ liệu và thư mục `lb`.
+- Lỗi reaction hoặc role: kiểm tra Discord permissions, thứ tự role và giới hạn API.
+- Test bị fail: mở log GitHub Actions để tìm nguyên nhân, không bỏ qua assertion.
+
+**Phát triển bởi Senko.**
