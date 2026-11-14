@@ -119,7 +119,7 @@ EloBotは、プレイヤー登録、試合結果の報告、Elo計算、ラン�
 - `-c_reg`は登録プレイヤーや関連する試合履歴を削除し、Leagueロールの除去を試みます。daily streakデータは設計上維持されます。実行前にバックアップしてください。
 - 過去のランキングは`lb/<guild_id>/Season <n>/Month <m>/`や`Overall/`に保存されます。
 
-**既知の問題:** `-lbs`では、アーカイブ内の空白を含む名前が誤って解析される場合があります。回帰テストはありますが、現時点では修正されていません。
+**アーカイブの互換性:** `-lbs`は空白やアクセント付きラテン文字を含む名前に対応しています。Discord IDがない古いアーカイブも読み取れますが、IDによる検索にはアーカイブ内のIDが必要です。
 
 ## ディレクトリ構成
 
@@ -150,7 +150,7 @@ python -m compileall -q cogs db utils tests elobot.py
 python -m pytest tests -q
 ~~~
 
-`main`へのpushまたはpull requestでGitHub ActionsがPython 3.11と3.12のテストを実行します。テストには一時的なSQLiteとDiscordのモックを使用します。実際のDiscordサーバーでの権限、reaction、ロール順序、メッセージ送信は別途確認してください。`-lbs`の既知の問題は`xfail`として扱います。
+`main`へのpushまたはpull requestでGitHub ActionsがPython 3.11と3.12のテストを実行します。テストには一時的なSQLiteとDiscordのモックを使用します。実際のDiscordサーバーでの権限、reaction、ロール順序、メッセージ送信は別途確認してください。`-lbs`の空白を含む名前に関する回帰テストは、通常の合格必須テストとして実行されます。
 
 ## トラブルシューティング
 
