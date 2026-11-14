@@ -243,8 +243,10 @@ class TestEmptyLeaderboard:
             ctx = FakeCtx(guild_id=1, author_id=1)
             view = LeaderboardView(ctx, category="elo")
             await view.update_leaderboard(ctx)
-            assert ctx.sent_view is view
+            # The empty-state path sends an error embed, not a leaderboard view.
+            assert ctx.sent_view is None
             assert ctx.sent_file is None
+            assert ctx.sent_embed.title == "Leaderboard Not Found"
 
         run(_body())
 
