@@ -126,10 +126,12 @@ class FakeCtx:
         self.author = FakeAuthor(author_id)
         self.sent_view = None
         self.sent_file = None
+        self.sent_embed = None
 
-    async def send(self, *, view=None, file=None):
+    async def send(self, *, view=None, file=None, embed=None):
         self.sent_view = view
         self.sent_file = file
+        self.sent_embed = embed
         return self
 
 
@@ -137,8 +139,10 @@ class FakeResponse:
     def __init__(self):
         self.sent_embed = None
         self.sent_ephemeral = None
+        self.sent_content = None
 
-    async def send_message(self, embed=None, ephemeral=False):
+    async def send_message(self, content=None, *, embed=None, ephemeral=False):
+        self.sent_content = content
         self.sent_embed = embed
         self.sent_ephemeral = ephemeral
 
@@ -430,7 +434,7 @@ class TestGamesPlayedThisMonthCategory:
 
             entries = render_spy[-1]["entries"]
             assert [e[1] for e in entries] == ["Alice", "Bob"]
-            assert layout_capture["note"] == "Play at least one set to be ranked"
+            assert layout_capture["note"] is None  # eligible player needs no note
 
         run(_body())
 
@@ -618,6 +622,7 @@ class TestMyRankButtonPermission:
 
             assert interaction.response.sent_ephemeral is True
             assert interaction.response.sent_embed is None  # plain content message
+            assert interaction.response.sent_content == "You cannot perform this action."
             assert view.jump_to_target is False  # never set
 
         run(_body())

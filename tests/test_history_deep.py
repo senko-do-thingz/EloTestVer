@@ -68,6 +68,10 @@ class Sink:
         self.sent_view = None
         self.sent_file = None
         self.sent_embed = None
+        self.response = self  # Fake interaction response for button.defer()
+
+    async def defer(self):
+        pass
 
     async def send(self, *, view=None, file=None, embed=None):
         self.sent_view = view
