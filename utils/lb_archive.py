@@ -48,7 +48,9 @@ def _split_leaderboard_fields(
             if len(stripped.split()) > 2:
                 return None
         else:
-            if (not win_rate or math.isfinite(parsed_number)) and possible_name.strip():
+            if win_rate and not math.isfinite(parsed_number):
+                return None
+            if possible_name.strip():
                 name, last_field, discord_id = (
                     possible_name, possible_value, last_field
                 )
