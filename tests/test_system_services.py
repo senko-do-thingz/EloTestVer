@@ -6,7 +6,9 @@ import zipfile
 import pytest
 
 import db.elo_db as db
-from db import counting_db
+from db.counting_db import (
+    increment_counting_stat, get_counting_leaderboard, reset_counting_stats,
+)
 from utils import lb_cache
 from utils.lb_export import (
     CATEGORY_FILENAMES,
@@ -182,14 +184,14 @@ def test_write_leaderboard_files_to_archive_directory(guild_db, tmp_path):
 
 def test_counting_stats_add_sort_limit_and_reset(guild_db):
     channel = 11
-    counting_db.increment_counting_stat(guild_db, channel, 101)
-    counting_db.increment_counting_stat(guild_db, channel, 101, 2)
-    counting_db.increment_counting_stat(guild_db, channel, 102, 2)
-    counting_db.increment_counting_stat(guild_db, channel + 1, 103, 7)
-    assert counting_db.get_counting_leaderboard(guild_db, channel) == [
+    increment_counting_stat(guild_db, channel, 101)
+    increment_counting_stat(guild_db, channel, 101, 2)
+    increment_counting_stat(guild_db, channel, 102, 2)
+    increment_counting_stat(guild_db, channel + 1, 103, 7)
+    assert get_counting_leaderboard(guild_db, channel) == [
         (101, 3), (102, 2)
     ]
-    assert counting_db.get_counting_leaderboard(guild_db, channel, limit=1) == [(101, 3)]
-    counting_db.reset_counting_stats(guild_db, channel)
-    assert counting_db.get_counting_leaderboard(guild_db, channel) == []
-    assert counting_db.get_counting_leaderboard(guild_db, channel + 1) == [(103, 7)]
+    assert get_counting_leaderboard(guild_db, channel, limit=1) == [(101, 3)]
+    reset_counting_stats(guild_db, channel)
+    assert get_counting_leaderboard(guild_db, channel) == []
+    assert get_counting_leaderboard(guild_db, channel + 1) == [(103, 7)]
