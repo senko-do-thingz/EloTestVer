@@ -20,7 +20,7 @@ import zipfile
 from db.elo_db import db_connection
 
 from .elo import calculate_win_rate
-from .lb_archive import format_leaderboard_export_line, parse_leaderboard_line
+from .lb_archive import format_leaderboard_export_line, read_leaderboard_rows
 
 # Category filename -> Discord-friendly section title, in the same order
 # used by -get_lb / -gld / -sum_lb.
@@ -155,21 +155,12 @@ def aggregate_season_categories(season_path: str) -> dict[str, str]:
             ("l.txt", player_losses),
         ):
             file_path = os.path.join(month_path, filename)
-            if not os.path.exists(file_path):
-                continue
             try:
-                with open(file_path, "r", encoding="utf-8") as f:
-                    lines = f.readlines()
+                rows = read_leaderboard_rows(file_path)
             except Exception:
                 continue
-            for line in lines:
-                stripped = line.strip()
-                if not stripped or stripped.lower().endswith("leaderboard"):
-                    continue
-                parsed = parse_leaderboard_line(stripped)
-                if parsed:
-                    name, value, discord_id = parsed
-                    _accumulate(target, name, value, discord_id)
+            for name, value, discord_id in rows:
+                _accumulate(target, name, value, discord_id)
 
     if not player_elo and not player_wins and not player_losses:
         return {}

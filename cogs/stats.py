@@ -22,8 +22,8 @@ from utils import (
     get_lb_root,
     get_most_played_with,
     get_opponent_games,
-    parse_leaderboard_line,
 )
+from utils.lb_archive import LB_ARCHIVE_FILES, read_leaderboard_rows
 from utils.autocomplete import stats_top_elo_name_autocomplete
 from utils.slash_ctx import SlashContext
 
@@ -115,27 +115,9 @@ def _resolve_overall_dir(season_dir: str) -> str | None:
 def _read_player_stat(
     dir_path: str, filename: str, player_id: str, *, win_rate: bool = False
 ) -> float | int | None:
-    """Look up a single player's value in a leaderboard archive file
-    (data.txt / w.txt / l.txt / wr.txt / games.txt), matched by Discord ID -
-    every line written by -get_lb's export already carries the player's
-    Discord ID as its third field (see format_leaderboard_export_line() /
-    parse_leaderboard_line() in utils/lb_archive.py), so matching on that
-    is both exact and immune to display-name changes/collisions that a
-    name match would be vulnerable to. Returns None if the file, the
-    player's line, or that line's Discord ID is missing."""
-    file_path = os.path.join(dir_path, filename)
-    if not os.path.exists(file_path):
-        return None
-    with open(file_path, "r", encoding="utf-8") as f:
-        lines = f.readlines()
-    for line in lines:
-        stripped = line.strip()
-        if not stripped or stripped.lower().endswith("leaderboard"):
-            continue
-        parsed = parse_leaderboard_line(stripped, win_rate=win_rate)
-        if not parsed:
-            continue
-        _name, value, discord_id = parsed
+    """Find a player's archived stat using the stable Discord ID."""
+    path = os.path.join(dir_path, filename)
+    for _name, value, discord_id in read_leaderboard_rows(path, win_rate=win_rate):
         if discord_id == player_id:
             return value
     return None
@@ -144,59 +126,28 @@ def _read_player_stat(
 def _get_rank_for_stat(
     dir_path: str, filename: str, value, *, win_rate: bool = False
 ) -> int | None:
-    """Return the 1-based rank of `value` within a leaderboard archive
-    file, or None if the file is missing/empty."""
-    file_path = os.path.join(dir_path, filename)
-    if not os.path.exists(file_path):
+    """Return a 1-based rank, or None if the archive is missing/empty."""
+    rows = read_leaderboard_rows(
+        os.path.join(dir_path, filename), win_rate=win_rate
+    )
+    if not rows:
         return None
-    with open(file_path, "r", encoding="utf-8") as f:
-        lines = f.readlines()
-    all_values = []
-    for line in lines:
-        stripped = line.strip()
-        if not stripped or stripped.lower().endswith("leaderboard"):
-            continue
-        parsed = parse_leaderboard_line(stripped, win_rate=win_rate)
-        if parsed:
-            all_values.append(parsed[1])
-    if not all_values:
-        return None
-    return sum(1 for v in all_values if v > value) + 1
+    return sum(1 for _, stat, _ in rows if stat > value) + 1
 
 
 def _find_player_name_in_archive(dir_path: str | None, user_id: int) -> str | None:
-    """
-    Look up a player's name by Discord ID within a single season/month (or
-    Overall) leaderboard archive directory. Used as a fallback for players
-    who are no longer (or not yet) present in the `players` table, so their
-    historical archive entry still resolves to a name.
-    """
+    """Look up archived names by ID even after a player's registration ends."""
     if not dir_path or not os.path.isdir(dir_path):
         return None
     user_id_str = str(user_id)
-    for filename, win_rate in (
-        ("data.txt", False),
-        ("w.txt", False),
-        ("l.txt", False),
-        ("wr.txt", True),
-        ("games.txt", False),
-    ):
-        file_path = os.path.join(dir_path, filename)
-        if not os.path.exists(file_path):
-            continue
-        with open(file_path, "r", encoding="utf-8") as f:
-            lines = f.readlines()
-        for line in lines:
-            stripped = line.strip()
-            if not stripped or stripped.lower().endswith("leaderboard"):
-                continue
-            parsed = parse_leaderboard_line(stripped, win_rate=win_rate)
-            if not parsed:
-                continue
-            name, _value, discord_id = parsed
-            if discord_id and discord_id == user_id_str:
+    for filename, win_rate in LB_ARCHIVE_FILES.items():
+        for name, _value, discord_id in read_leaderboard_rows(
+            os.path.join(dir_path, filename), win_rate=win_rate
+        ):
+            if discord_id == user_id_str:
                 return name
     return None
+
 
 def _season_length(
     history: list[tuple[int, int]], fallback_max_month: int, season: int

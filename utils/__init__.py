@@ -5,7 +5,6 @@ Most cogs import symbols from `utils` for convenience.
 Internally, implementations live in submodules to match the project diagram.
 """
 
-from datetime import datetime, timezone
 from .elo import calculate_elo, calculate_elo_detailed, calculate_win_rate  # noqa: F401
 from .guards import NAME_MAX_LENGTH, NAME_MIN_LENGTH, NAME_RULE_TEXT, is_admin, is_admin_interaction, is_valid_name  # noqa: F401
 from db.h2h_db import (  # noqa: F401
@@ -15,7 +14,7 @@ from db.h2h_db import (  # noqa: F401
     get_opponent_games,
     rename_opponent_in_h2h,
 )
-from db.match_history_db import rename_opponent_in_match_history
+from db.match_history_db import rename_opponent_in_match_history  # noqa: F401
 from .lb_archive import (  # noqa: F401
     LB_ARCHIVE_FILES,
     format_leaderboard_export_line,
@@ -63,35 +62,5 @@ from .elo_graph import (  # noqa: F401
 )
 from .logger import bot_log  # noqa: F401
 from config import PRIVATE_GUILD_ID  # noqa: F401
-
-
-def sync_against_names(cursor, old_name: str, new_name: str) -> None:
-    """
-    Rename opponent_name in h2h_stats and match_history when a player's
-    display name changes.
-
-    Caller is responsible for committing the transaction.
-    """
-    rename_opponent_in_h2h(cursor, old_name, new_name)
-    rename_opponent_in_match_history(cursor, old_name, new_name)
-
-
-def format_relative_time(dt: datetime) -> str:
-    now = datetime.now(timezone.utc)
-    if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
-    diff = now - dt
-    seconds = int(diff.total_seconds())
-    if seconds < 0:
-        seconds = 0
-    
-    if seconds < 60:
-        return f"{seconds} seconds ago" if seconds >= 5 else "just now"
-    minutes = seconds // 60
-    if minutes < 60:
-        return f"{minutes} minutes ago" if minutes > 1 else "1 minute ago"
-    hours = minutes // 60
-    if hours < 24:
-        return f"{hours} hours ago" if hours > 1 else "1 hour ago"
-    days = hours // 24
-    return f"{days} days ago" if days > 1 else "1 day ago"
+from .name_sync import sync_against_names  # noqa: F401
+from .time_format import format_relative_time  # noqa: F401

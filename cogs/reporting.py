@@ -1,6 +1,5 @@
 import asyncio
 import logging
-import re
 import typing
 
 import discord
@@ -24,6 +23,7 @@ from db.match_history_db import (
 from utils import calculate_elo_detailed, is_admin, is_admin_interaction, sync_league_roles
 from utils.lb_cache import invalidate as lb_cache_invalidate, schedule_rebuild as lb_cache_rebuild
 from config import YES_EMOJI, NO_EMOJI
+from utils.score_parsing import parse_combined_score
 from utils.slash_ctx import SlashContext
 
 logger = logging.getLogger(__name__)
@@ -62,11 +62,8 @@ class ReportingCog(commands.Cog):
     )
 
     def _parse_combined_score(self, score: str) -> tuple[int, int] | None:
-        stripped = score.strip()
-        match = re.match(r"(\d)\s*(\d)$", stripped) or re.match(r"(\d)\s*[-:]\s*(\d)$", stripped)
-        if not match:
-            return None
-        return int(match.group(1)), int(match.group(2))
+        # Preserve the admin command's existing whitespace tolerance.
+        return parse_combined_score(score.strip())
 
     def _parse_ad_rp_args(
         self, player1_id: int, args: tuple[str, ...]
@@ -120,12 +117,11 @@ class ReportingCog(commands.Cog):
             if arg2 is None:
                 return "Invalid format. Please use either:\n- `-report @winner score @loser`\n- `-report @player1 score1 score2 @player2`"
 
-            match = re.match(r"(\d)\s*(\d)$", arg1) or re.match(r"(\d)\s*[-:]\s*(\d)$", arg1)
-            if not match:
+            parsed = parse_combined_score(arg1)
+            if parsed is None:
                 return "Invalid score format. Please use formats like '31', '4-2', '3:1', or '4 2'."
 
-            winner_score = int(match.group(1))
-            loser_score = int(match.group(2))
+            winner_score, loser_score = parsed
             if winner_score == loser_score:
                 return "Scores cannot be equal. There must be a winner."
             winner, loser = player1, None

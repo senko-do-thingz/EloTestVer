@@ -46,7 +46,7 @@ _ADMIN_COMMANDS = {
     "set_w", "set_wid",
     "set_l", "set_lid",
     "set_gid", "set_stats",
-    "d_reg", "did_reg", "c_reg", "db_d",
+    "c_reg",
     "get_lb", "set_id", "sum_lb",
     "devmode",
     "ladmin", "ledit", "ladd", "lapply", "lclear",
@@ -246,8 +246,8 @@ async def load_extensions():
             # bot_log needs the bot to be ready – defer until on_ready
             _failed_extensions.append((ext, e))
 
-    # Load private cogs from cogs/private/ - must come AFTER main cogs so that
-    # cogs like PrivateHelpCog can safely call bot.remove_command("help").
+    # Load private cogs after public modules, which provide shared commands
+    # and the centralized help system.
     for module_info in pkgutil.iter_modules(_private_cogs_pkg.__path__):
         if module_info.name.startswith("_"):
             continue
