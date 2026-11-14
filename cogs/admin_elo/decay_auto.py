@@ -16,9 +16,10 @@ helpers used here and by the manual -decay command):
    /months): apply Elo decay + reset monthly game counts, exactly like a
    manual -decay run.
    If it IS the last month of the season: skip the Elo decay math (the
-   final month's standings are left untouched), show the season-end
-   notice (see utils.elo_decay.season_end_notice), and instead aggregate
-   the whole season (-sum_lb's logic) into ``lb/<guild_id>/Season <n>/Overall/``.
+   final month's standings are archived before registration cleanup),
+   show the season-end notice (see utils.elo_decay.season_end_notice),
+   aggregate the whole season into ``lb/<guild_id>/Season <n>/Overall/``,
+   and clear registrations using -c_reg's shared implementation.
 4. Advance the season/month cursor by 1 (rolling over into next season if
    needed), same rule as advance_season_month_cursor() has always used.
 5. Post a change-log embed (same format as a manual -decay run), including
@@ -61,6 +62,8 @@ from utils.lb_cache import (
 )
 from utils.logger import bot_log
 
+from .registration import clear_all_registrations
+
 # A few minutes after daily_streak_refresh.py's midnight task, so both never
 # race for the same guild databases. Sourced from utils/elo_decay.py so this
 # schedule and -decay's "time remaining" preview (dev mode off) never drift
@@ -88,6 +91,19 @@ async def run_monthly_decay_for_guild(bot: commands.Bot, guild_id: int) -> None:
         # season into Season n/Overall/ instead (same math as -sum_lb).
         _, overall_log_line = await export_season_overall(guild_id, season)
 
+        # Keep the final-month snapshots intact, then run the same cleanup
+        # as -c_reg BEFORE moving into the next season. A failed cleanup
+        # must not mark the rollover as successful.
+        result = await clear_all_registrations(bot, guild_id)
+        c_reg_log_line = (
+            f"Ran `-c_reg` automatically: {result.players_cleared} registered "
+            "player(s) and their stats permanently deleted. League role "
+            f"cleanup: {result.roles.removed} removed, {result.roles.failed} "
+            f"failed, {result.roles.not_found} not found in server."
+            if result.players_cleared
+            else "Ran `-c_reg` automatically: no registered players to clear."
+        )
+
         with db_connection(guild_id) as (conn, cursor):
             cursor.execute("UPDATE players SET games_played_this_month=0")
             old_season, old_month, new_season, new_month = advance_season_month_cursor(
@@ -104,11 +120,11 @@ async def run_monthly_decay_for_guild(bot: commands.Bot, guild_id: int) -> None:
         embed = discord.Embed(
             title="Season Complete - Elo Decay Skipped",
             description=(
-                f"{season_end_notice(old_season)}\n\n"
+                f"{season_end_notice(old_season, auto_clear_registrations=True)}\n\n"
                 f"**Season/Month transition:** Season {old_season}, Month {old_month} "
                 f"-> Season {new_season}, Month {new_month}\n\n"
                 f"**File export log:**\n- {month_log_line}\n- {overall_log_line}\n"
-                f"- {purge_log_line}"
+                f"- {purge_log_line}\n- {c_reg_log_line}"
             ),
             color=discord.Color.blue(),
         )
@@ -122,6 +138,7 @@ async def run_monthly_decay_for_guild(bot: commands.Bot, guild_id: int) -> None:
                 "Season/Month": f"{old_season}/{old_month} -> {new_season}/{new_month}",
                 "Month export": month_log_line,
                 "Overall export": overall_log_line,
+                "Registration cleanup": c_reg_log_line,
             },
         )
         return
