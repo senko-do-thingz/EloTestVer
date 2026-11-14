@@ -266,16 +266,11 @@ class PlayerSearchModal(discord.ui.Modal, title="Search Player Stats"):
             player_stats = stats_data[player_key]
 
             def get_stat_value(category: str):
-                value = player_stats.get(category)
-                fp = os.path.join(mpath, FILE_MAP[category])
-                if value is not None:
-                    return value, True
-                return ("-", os.path.exists(fp))
+                # Search only uses the value; the old availability flag was unused.
+                return player_stats.get(category, "-")
 
             def get_rank_for_stat(category: str, value) -> int | None:
                 fp = os.path.join(mpath, FILE_MAP[category])
-                if not os.path.exists(fp):
-                    return None
                 values = [
                     stat for _, stat, _ in read_leaderboard_rows(
                         fp, win_rate=category == "win_rate"
@@ -285,11 +280,11 @@ class PlayerSearchModal(discord.ui.Modal, title="Search Player Stats"):
                     return None
                 return sum(1 for stat in values if stat > value) + 1
 
-            elo, _ = get_stat_value("elo")
-            wins, _ = get_stat_value("wins")
-            losses, _ = get_stat_value("losses")
-            games_played_this_month, _ = get_stat_value("games_played_this_month")
-            win_rate, _ = get_stat_value("win_rate")
+            elo = get_stat_value("elo")
+            wins = get_stat_value("wins")
+            losses = get_stat_value("losses")
+            games_played_this_month = get_stat_value("games_played_this_month")
+            win_rate = get_stat_value("win_rate")
 
             elo_rank = get_rank_for_stat("elo", elo) if elo != "-" else None
             wins_rank = get_rank_for_stat("wins", wins) if wins != "-" else None
@@ -462,7 +457,7 @@ class LBView(discord.ui.View):
         return os.path.join(self.mpath, FILE_MAP.get(category, "data.txt"))
 
     def update_buttons(self):
-        # children order: dropdown(0), prev(1), next(2), search(3), back(4)
+        # children order: dropdown(0), prev(1), next(2), my rank(3), search(4), back(5)
         if len(self.children) > 2:
             self.children[1].disabled = self.page == 0
             self.children[2].disabled = self.page >= self.total_pages - 1
@@ -470,7 +465,6 @@ class LBView(discord.ui.View):
     # ── main render ─────────────────────────────────────────────────────────
 
     async def update(self, interaction: discord.Interaction):
-        conn = None
         try:
             # Guard: overall month can't show games_played_this_month
             if self.month.lower() == "overall" and self.category == "games_played_this_month":
@@ -662,6 +656,3 @@ class LBView(discord.ui.View):
                     ),
                     ephemeral=True,
                 )
-        finally:
-            if conn:
-                conn.close()
