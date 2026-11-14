@@ -12,6 +12,7 @@ Only the numeric stat and optional Discord ID are positional fields.
 import math
 import os
 import re
+from collections.abc import Iterable
 
 
 def _is_discord_id(value: str) -> bool:
@@ -75,6 +76,28 @@ def parse_leaderboard_line(
         return None
     name, value_str, discord_id = fields
     return name, float(value_str) if win_rate else int(value_str), discord_id
+
+
+def parse_leaderboard_lines(
+    lines: Iterable[str], *, win_rate: bool = False
+) -> list[tuple[str, float | int, str | None]]:
+    """Parse archive rows once, consistently ignoring headers and bad lines."""
+    rows = []
+    for line in lines:
+        parsed = parse_leaderboard_line(line, win_rate=win_rate)
+        if parsed is not None:
+            rows.append(parsed)
+    return rows
+
+
+def read_leaderboard_rows(
+    file_path: str, *, win_rate: bool = False
+) -> list[tuple[str, float | int, str | None]]:
+    """Read an archived category. Missing files have no rows."""
+    if not os.path.exists(file_path):
+        return []
+    with open(file_path, "r", encoding="utf-8") as file:
+        return parse_leaderboard_lines(file, win_rate=win_rate)
 
 
 def format_leaderboard_export_line(name: str, value, discord_id) -> str:
